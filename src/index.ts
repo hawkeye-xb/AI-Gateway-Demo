@@ -405,6 +405,14 @@ export default {
       return Response.json({ balance }, { headers: { 'Access-Control-Allow-Origin': '*' } });
     }
 
+    // Admin: init demo credits (one-time)
+    if (url.pathname === '/api/admin/init-credits') {
+      const ledger = new CreditLedgerStub(env.CREDIT_LEDGER);
+      await ledger.topUp('demo-user', 10000, 'init-' + Date.now());
+      const balance = await ledger.getBalance('demo-user');
+      return Response.json({ balance, message: 'Credits initialized' }, { headers: { 'Access-Control-Allow-Origin': '*' } });
+    }
+
     if (url.pathname === '/api/audit/log') {
       const limit = parseInt(url.searchParams.get('limit') || '20');
       const result = await env.DB.prepare(

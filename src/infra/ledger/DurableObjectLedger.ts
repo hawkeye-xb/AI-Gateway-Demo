@@ -11,6 +11,36 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
   private reservations = new Map<string, Reservation>();
   private processedTopUps = new Set<string>();
 
+  // HTTP fetch handler for stub-based calls
+  async fetch(request: Request): Promise<Response> {
+    const { method, args } = await request.json() as { method: string; args: unknown[] };
+    try {
+      let result: unknown;
+      switch (method) {
+        case 'reserve':
+          result = await this.reserve(args[0] as string, args[1] as number, args[2] as string);
+          break;
+        case 'settle':
+          await this.settle(args[0] as string, args[1] as number);
+          break;
+        case 'release':
+          await this.release(args[0] as string);
+          break;
+        case 'getBalance':
+          result = await this.getBalance(args[0] as string);
+          break;
+        case 'topUp':
+          await this.topUp(args[0] as string, args[1] as number, args[2] as string);
+          break;
+        default:
+          return new Response(JSON.stringify({ error: `unknown method: ${method}` }), { status: 400 });
+      }
+      return new Response(JSON.stringify(result ?? null));
+    } catch (e) {
+      return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500 });
+    }
+  }
+
   async reserve(accountId: string, estimatedCredit: number, idempotencyKey: string): Promise<string> {
     if (this.reservations.has(idempotencyKey)) {
       return idempotencyKey;

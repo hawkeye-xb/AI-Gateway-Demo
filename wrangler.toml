@@ -13,7 +13,7 @@ class_name = "CreditLedger"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["CreditLedger"]
+new_sqlite_classes = ["CreditLedger"]
 
 [vars]
 SUPABASE_JWKS_URL = "https://cdfcboqhirhadzykeeey.supabase.co/auth/v1/.well-known/jwks.json"
