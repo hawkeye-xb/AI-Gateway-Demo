@@ -422,7 +422,9 @@ export default {
       const userId = extractUserId(request);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       try {
-        const resp = await fetch('https://api.creem.io/v1/checkouts', {
+        const isTestKey = env.CREEM_API_KEY.startsWith('creem_test_');
+        const baseUrl = isTestKey ? 'https://test-api.creem.io/v1' : 'https://api.creem.io/v1';
+        const resp = await fetch(baseUrl + '/checkouts', {
           method: 'POST',
           headers: { 'x-api-key': env.CREEM_API_KEY, 'Content-Type': 'application/json' },
           body: JSON.stringify({
