@@ -163,10 +163,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     </div>
     <div style="display:flex;gap:8px;align-items:center">
       <select id="credit-pack" style="padding:6px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;font-size:12px">
-        <option value="1">1M credits ($1)</option>
-        <option value="5">5M credits ($1)</option>
-        <option value="10">10M credits ($1)</option>
-        <option value="50">50M credits ($1)</option>
+        <option value="1">1M credits — $1</option>
+        <option value="5">5M credits — $5</option>
+        <option value="10">10M credits — $10</option>
+        <option value="50">50M credits — $50</option>
       </select>
       <button onclick="gwBuyCredits()" class="btn-buy">💰 Buy</button>
       <button onclick="gwRefreshBalance()" style="padding:8px 16px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;cursor:pointer;font-size:12px">Refresh</button>
@@ -421,7 +421,9 @@ export default {
       const result = await env.DB.prepare(
         'SELECT modality, model, usage_kind, usage_amount, credits_charged, timestamp FROM audit_log WHERE account_id = ? ORDER BY timestamp DESC LIMIT ?'
       ).bind(userId, limit).all();
-      return Response.json(result, { headers: { 'Access-Control-Allow-Origin': '*' } });
+      // D1 returns rows under `.results`; the frontend reads `d.rows`. Return `rows`
+      // explicitly so the "Recent Usage" table renders instead of showing "No usage yet".
+      return Response.json({ rows: result.results }, { headers: { 'Access-Control-Allow-Origin': '*' } });
     }
 
     // ── Creem checkout ──
@@ -438,6 +440,8 @@ export default {
           headers: { 'x-api-key': env.CREEM_API_KEY, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             product_id: 'prod_vfOhDIXGlk1Dfkd8MT6AB',
+            units: creditsMult,
+            custom_price: 100,  // $1.00 per unit in cents — overrides product price
             success_url: url.origin + '/',
             metadata: { accountId: userId, requestId: crypto.randomUUID(), credits: String(creditsMult * 1000000) },
           }),
