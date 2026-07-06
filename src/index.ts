@@ -281,9 +281,12 @@ async function gwRefreshLog() {
     if (!d.rows || d.rows.length === 0) {
       tb.innerHTML = '<tr><td colspan="5" style="color:#8b949e">No usage yet</td></tr>';
     } else {
-      tb.innerHTML = d.rows.map(r =>
-        '<tr><td>'+new Date(r.timestamp).toLocaleString()+'</td><td>'+r.modality+'</td><td>'+r.model+'</td><td>'+r.usage_amount+' '+r.usage_kind+'</td><td class="credit">-'+r.credits_charged+'</td></tr>'
-      ).join('');
+      tb.innerHTML = d.rows.map(function(r) {
+        var isTop = r.kind === 'topup';
+        var sign = isTop ? '+' : '-';
+        var col = isTop ? '#3fb950' : '#f0883e';
+        return '<tr><td>'+new Date(r.timestamp).toLocaleString()+'</td><td>'+r.modality+'</td><td>'+r.model+'</td><td>'+r.usage_amount+' '+r.usage_kind+'</td><td style="color:'+col+';font-weight:600">'+sign+r.credits+'</td></tr>';
+      }).join('');
     }
   } catch(_e) {}
 }
@@ -418,9 +421,16 @@ export default {
       const userId = extractUserId(request);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       const limit = parseInt(url.searchParams.get('limit') || '20');
+      // Unified timeline: spend (audit_log) + top-ups (topups), newest first.
       const result = await env.DB.prepare(
-        'SELECT modality, model, usage_kind, usage_amount, credits_charged, timestamp FROM audit_log WHERE account_id = ? ORDER BY timestamp DESC LIMIT ?'
-      ).bind(userId, limit).all();
+        `SELECT kind, modality, model, usage_kind, usage_amount, credits, timestamp FROM (
+           SELECT 'spend' AS kind, modality, model, usage_kind, usage_amount, credits_charged AS credits, timestamp
+             FROM audit_log WHERE account_id = ?
+           UNION ALL
+           SELECT 'topup' AS kind, 'topup' AS modality, source AS model, 'credits' AS usage_kind, credits AS usage_amount, credits, timestamp
+             FROM topups WHERE account_id = ?
+         ) ORDER BY timestamp DESC LIMIT ?`
+      ).bind(userId, userId, limit).all();
       // D1 returns rows under `.results`; the frontend reads `d.rows`. Return `rows`
       // explicitly so the "Recent Usage" table renders instead of showing "No usage yet".
       return Response.json({ rows: result.results }, { headers: { 'Access-Control-Allow-Origin': '*' } });
@@ -480,7 +490,20 @@ export default {
         if (eventType === 'checkout.completed') {
           const credits = parseInt(payload.object?.metadata?.credits || '1000000') || 1000000;
           const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, accountId);
-          await ledger.topUp(accountId, credits, 'creem-' + externalEventId); // 100,000 credits for demo pack
+          await ledger.topUp(accountId, credits, 'creem-' + externalEventId);
+          // Record the top-up so "how much did I top up" is queryable from D1
+          // (previously only the event id was stored, with no amount).
+          const order = (payload.object?.order || {}) as { amount?: number; amount_paid?: number; currency?: string };
+          const amountCents = order.amount ?? order.amount_paid ?? payload.object?.amount;
+          await audit.recordTopUp({
+            accountId,
+            externalEventId,
+            source: 'creem',
+            credits,
+            amountUsd: typeof amountCents === 'number' ? amountCents / 100 : null,
+            currency: order.currency ?? null,
+            timestamp: Date.now(),
+          });
         }
 
         return Response.json({ ok: true });

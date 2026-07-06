@@ -21,6 +21,30 @@ export class D1AuditSink implements IAuditSink {
     ).run();
   }
 
+  async recordTopUp(row: {
+    accountId: string;
+    externalEventId: string;
+    source: string;
+    credits: number;
+    amountUsd: number | null;
+    currency: string | null;
+    timestamp: number;
+  }): Promise<void> {
+    await this.db.prepare(
+      `INSERT INTO topups (account_id, external_event_id, source, credits, amount_usd, currency, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (source, external_event_id) DO NOTHING`
+    ).bind(
+      row.accountId,
+      row.externalEventId,
+      row.source,
+      row.credits,
+      row.amountUsd,
+      row.currency,
+      row.timestamp,
+    ).run();
+  }
+
   async claimEvent(externalEventId: string, source: string): Promise<boolean> {
     const result = await this.db.prepare(
       `INSERT INTO processed_events (source, external_event_id, processed_at)
