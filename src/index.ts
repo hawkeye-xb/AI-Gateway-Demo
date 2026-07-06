@@ -8,6 +8,8 @@ import { D1PriceBook } from './infra/pricebook/D1PriceBook';
 import { TokenBasedRatePlan } from './infra/rateplan/TokenBasedRatePlan';
 import { TokenUsageExtractor, AudioDurationExtractor } from './infra/usage/TokenUsageExtractor';
 import { CreditLedger } from './infra/ledger/DurableObjectLedger';
+import { CreditLedgerStub } from './infra/ledger/CreditLedgerStub';
+import { handleAsrStream } from './realtime/AsrRelay';
 import type { IAiProviderClient } from './domain/IAiProviderClient';
 
 export { CreditLedger };
@@ -55,39 +57,8 @@ function buildUseCase(env: Env, userId: string): AiCallUseCase {
 }
 
 // ── Per-user DO stub ──
-class CreditLedgerStub {
-  private stub: DurableObjectStub;
-
-  constructor(ns: DurableObjectNamespace<CreditLedger>, accountId: string) {
-    const id = ns.idFromName(accountId);
-    this.stub = ns.get(id);
-  }
-
-  private async call(method: string, ...args: unknown[]): Promise<unknown> {
-    const resp = await this.stub.fetch('http://do/op', {
-      method: 'POST',
-      body: JSON.stringify({ method, args }),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
-    return resp.json();
-  }
-
-  async reserve(accountId: string, estimatedCredit: number, idempotencyKey: string): Promise<string> {
-    return (await this.call('reserve', accountId, estimatedCredit, idempotencyKey)) as string;
-  }
-  async settle(reservationId: string, actualCredit: number): Promise<void> {
-    await this.call('settle', reservationId, actualCredit);
-  }
-  async release(reservationId: string): Promise<void> {
-    await this.call('release', reservationId);
-  }
-  async getBalance(_accountId: string): Promise<number> {
-    return (await this.call('getBalance', _accountId)) as number;
-  }
-  async topUp(_accountId: string, amount: number, idempotencyKey: string): Promise<void> {
-    await this.call('topUp', _accountId, amount, idempotencyKey);
-  }
-}
+// (extracted to ./infra/ledger/CreditLedgerStub so the realtime ASR relay can
+// reuse the exact same reserve/settle path.)
 
 // ── Frontend HTML ──
 const HTML = `<!DOCTYPE html>
@@ -200,13 +171,32 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   </div>
 
   <div id="panel-asr" class="panel">
-    <div class="upload-area" onclick="document.getElementById('audio-input').click()">
-      <p style="color:#8b949e">🎙️ Click to upload audio</p>
-      <p id="audio-name" style="color:#58a6ff;margin-top:8px;font-size:13px"></p>
+    <div style="display:flex;gap:8px;margin-bottom:14px">
+      <button id="asr-tab-offline" class="tab active" onclick="gwAsrMode('offline')" style="font-size:13px">📁 离线 Offline · qwen3-asr-flash</button>
+      <button id="asr-tab-realtime" class="tab" onclick="gwAsrMode('realtime')" style="font-size:13px">🔴 实时 Realtime · paraformer</button>
     </div>
-    <input type="file" id="audio-input" accept="audio/*" style="display:none" onchange="gwPreviewAudio(event)" />
-    <button onclick="gwSendAsr()" id="asr-send" style="width:100%;padding:12px;background:#238636;border:none;border-radius:8px;color:white;font-size:14px;cursor:pointer;font-weight:600">Transcribe</button>
-    <div class="result-area" id="asr-result"></div>
+
+    <!-- Offline: upload a file, back end transcribes, single post-hoc settle -->
+    <div id="asr-sub-offline">
+      <div class="upload-area" onclick="document.getElementById('audio-input').click()">
+        <p style="color:#8b949e">🎙️ 点击上传音频文件（wav / mp3 / m4a…）</p>
+        <p id="audio-name" style="color:#58a6ff;margin-top:8px;font-size:13px"></p>
+      </div>
+      <input type="file" id="audio-input" accept="audio/*" style="display:none" onchange="gwPreviewAudio(event)" />
+      <button onclick="gwSendAsr()" id="asr-send" style="width:100%;padding:12px;background:#238636;border:none;border-radius:8px;color:white;font-size:14px;cursor:pointer;font-weight:600">Transcribe</button>
+      <div class="result-area" id="asr-result"></div>
+      <p style="color:#8b949e;font-size:12px;margin-top:8px">计费：整段识别完成后，按返回的音频时长一次性结算（5 credits/秒）。</p>
+    </div>
+
+    <!-- Realtime: mic streaming over WebSocket, reserve hold then settle on stop -->
+    <div id="asr-sub-realtime" style="display:none">
+      <div style="text-align:center;padding:8px 0 16px">
+        <button id="asr-rec-btn" onclick="gwAsrToggle()" style="padding:14px 32px;background:#238636;border:none;border-radius:10px;color:white;font-size:15px;cursor:pointer;font-weight:700">🔴 开始录音</button>
+      </div>
+      <div id="asr-meter" style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:12px 14px;font-size:13px;color:#8b949e;text-align:center;margin-bottom:12px">按「开始录音」授权麦克风后即时转写；连接时预扣一笔额度，停止时按实际时长结算。</div>
+      <div class="result-area" id="asr-live-transcript" style="min-height:120px">（实时字幕会显示在这里…）</div>
+      <p style="color:#8b949e;font-size:12px;margin-top:8px">计费：连接时<b>预扣 held</b> 900 credits（上限 180s）；停止时按<b>实际流过的音频秒数结算</b>，释放未用部分。</p>
+    </div>
   </div>
 
   <h3 style="margin-top:32px;margin-bottom:12px;color:#8b949e;font-size:14px">📋 Recent Usage</h3>
@@ -221,7 +211,9 @@ const SUPABASE_URL = 'https://cdfcboqhirhadzykeeey.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_L3tlauTO-QrKwseMijNGlQ_XiJAbSLR';
 const API_BASE = '';
 
-let _gw_sb, _gw_session, _gw_tab = 'llm', _gw_img = null, _gw_aud = null;
+let _gw_sb, _gw_session, _gw_tab = 'llm', _gw_img = null, _gw_aud = null, _gw_audUri = null;
+// Realtime ASR state
+let _gw_asrWs = null, _gw_asrCtx = null, _gw_asrProc = null, _gw_asrStream = null, _gw_asrRec = false, _gw_asrFinal = '';
 
 function gwInitSb() {
   _gw_sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -347,22 +339,150 @@ function gwPreviewAudio(ev) {
   const f = ev.target.files[0]; if (!f) return;
   document.getElementById('audio-name').textContent = f.name;
   const rd = new FileReader();
-  rd.onload = function() { _gw_aud = rd.result.split(',')[1]; };
+  rd.onload = function() { _gw_audUri = rd.result; _gw_aud = rd.result.split(',')[1]; };
   rd.readAsDataURL(f);
 }
 
+// ── Offline ASR: qwen3-asr-flash, base64 in → text out, single post-hoc settle ──
 async function gwSendAsr() {
-  if (!_gw_aud) { alert('Upload an audio file first'); return; }
+  if (!_gw_audUri) { alert('Upload an audio file first'); return; }
   document.getElementById('asr-send').disabled = true;
+  document.getElementById('asr-result').textContent = '识别中…';
   try {
     const d = await gwApi('/api/ai/run', {
-      modality:'asr', model:'paraformer-v2', providerKey:'bailian', streaming:false,
-      payload:{model:'paraformer-v2', input:{audio:'data:audio/wav;base64,'+_gw_aud}}
+      modality:'asr', model:'qwen3-asr-flash', providerKey:'bailian', streaming:false,
+      payload:{ audio: _gw_audUri }
     });
-    document.getElementById('asr-result').textContent = (d.raw?.output?.text || JSON.stringify(d.raw))+'\\n\\n-'+d.cost+' credits';
+    var _at = (d.raw && d.raw.text) ? d.raw.text
+      : (d.raw && d.raw.output && d.raw.output.choices && d.raw.output.choices[0] && d.raw.output.choices[0].message
+          && Array.isArray(d.raw.output.choices[0].message.content)
+            ? d.raw.output.choices[0].message.content.map(function(x){ return (x && x.text) ? x.text : ''; }).join('')
+            : JSON.stringify(d.raw));
+    document.getElementById('asr-result').textContent = _at + '\\n\\n-' + d.cost + ' credits';
     gwRefreshBalance(); gwRefreshLog();
   } catch(e) { document.getElementById('asr-result').textContent = 'Error: '+e.message; }
   document.getElementById('asr-send').disabled = false;
+}
+
+// ── ASR sub-mode switch (offline vs realtime) ──
+function gwAsrMode(mode) {
+  document.getElementById('asr-sub-offline').style.display = mode === 'offline' ? 'block' : 'none';
+  document.getElementById('asr-sub-realtime').style.display = mode === 'realtime' ? 'block' : 'none';
+  document.getElementById('asr-tab-offline').classList.toggle('active', mode === 'offline');
+  document.getElementById('asr-tab-realtime').classList.toggle('active', mode === 'realtime');
+  if (mode !== 'realtime' && _gw_asrRec) gwAsrStop();
+}
+
+// ── Realtime ASR: mic → PCM16@16k → WebSocket → paraformer, reserve→settle ──
+function gwAsrToggle() { if (_gw_asrRec) gwAsrStop(); else gwAsrStart(); }
+
+async function gwAsrStart() {
+  if (_gw_asrRec) return;
+  const meter = document.getElementById('asr-meter');
+  const tr = document.getElementById('asr-live-transcript');
+  tr.textContent = ''; _gw_asrFinal = '';
+  meter.textContent = '连接中…';
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(proto + '://' + location.host + '/api/asr/stream?token=' + encodeURIComponent(_gw_session.access_token));
+  ws.binaryType = 'arraybuffer';
+  _gw_asrWs = ws;
+
+  ws.onmessage = function(ev) {
+    var m; try { m = JSON.parse(ev.data); } catch(_e) { return; }
+    if (m.type === 'ready') {
+      meter.innerHTML = '🎙️ 录音中…（预扣 held <b>' + m.heldCredits + '</b> credits）';
+    } else if (m.type === 'partial') {
+      tr.textContent = _gw_asrFinal + m.text;
+    } else if (m.type === 'final') {
+      _gw_asrFinal += m.text; tr.textContent = _gw_asrFinal;
+    } else if (m.type === 'meter') {
+      meter.innerHTML = '🎙️ 预扣(held): <b>' + m.heldCredits + '</b> · 已用(used): <b style="color:#f0883e">' + m.usedCredits + '</b> credits · ' + m.usedSeconds + 's';
+    } else if (m.type === 'limit') {
+      meter.innerHTML = '⏱ 已达 ' + '180s 上限，自动停止…';
+    } else if (m.type === 'settled') {
+      meter.innerHTML = '✅ 结算 settled: <b style="color:#f0883e">' + m.credits + '</b> credits（预扣 ' + m.heldCredits + ' → 释放 ' + m.releasedCredits + '，时长 ' + m.seconds + 's）';
+      gwRefreshBalance(); gwRefreshLog();
+      gwAsrCleanup();
+    } else if (m.type === 'error') {
+      meter.textContent = '错误: ' + (m.message || m.code || 'unknown');
+      gwAsrCleanup();
+    }
+  };
+  ws.onclose = function() { gwAsrCleanup(); };
+  ws.onerror = function() { meter.textContent = '连接错误（WebSocket）'; };
+
+  try {
+    _gw_asrStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch(e) {
+    meter.textContent = '麦克风权限被拒绝：' + e.message;
+    try { ws.close(); } catch(_e) {}
+    return;
+  }
+
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  _gw_asrCtx = ctx;
+  const inRate = ctx.sampleRate;
+  const src = ctx.createMediaStreamSource(_gw_asrStream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  _gw_asrProc = proc;
+  proc.onaudioprocess = function(e) {
+    if (!_gw_asrWs || _gw_asrWs.readyState !== 1) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const pcm = gwDownsampleTo16kPCM(input, inRate);
+    if (pcm && pcm.byteLength) { try { _gw_asrWs.send(pcm); } catch(_e) {} }
+  };
+  // Route through a zero-gain node so the processor keeps firing without echoing mic to speakers.
+  const mute = ctx.createGain(); mute.gain.value = 0;
+  src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+
+  _gw_asrRec = true;
+  const btn = document.getElementById('asr-rec-btn');
+  btn.textContent = '⏹ 停止'; btn.style.background = '#da3633';
+}
+
+function gwDownsampleTo16kPCM(input, inRate) {
+  const outRate = 16000;
+  var data = input;
+  if (inRate !== outRate) {
+    const ratio = inRate / outRate;
+    const newLen = Math.floor(input.length / ratio);
+    const out = new Float32Array(newLen);
+    for (var i = 0; i < newLen; i++) {
+      const idx = i * ratio; const i0 = Math.floor(idx); const i1 = Math.min(i0 + 1, input.length - 1);
+      const frac = idx - i0;
+      out[i] = input[i0] * (1 - frac) + input[i1] * frac;
+    }
+    data = out;
+  }
+  const buf = new ArrayBuffer(data.length * 2);
+  const view = new DataView(buf);
+  for (var j = 0; j < data.length; j++) {
+    var s = Math.max(-1, Math.min(1, data[j]));
+    view.setInt16(j * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return buf;
+}
+
+function gwAsrStop() {
+  // Tell the server to finish the task; keep the WS open to receive final text + settlement.
+  if (_gw_asrWs && _gw_asrWs.readyState === 1) { try { _gw_asrWs.send(JSON.stringify({ type: 'stop' })); } catch(_e) {} }
+  if (_gw_asrProc) { try { _gw_asrProc.disconnect(); } catch(_e) {} }
+  if (_gw_asrCtx) { try { _gw_asrCtx.close(); } catch(_e) {} }
+  if (_gw_asrStream) { try { _gw_asrStream.getTracks().forEach(function(t){ t.stop(); }); } catch(_e) {} }
+  _gw_asrRec = false;
+  const btn = document.getElementById('asr-rec-btn');
+  btn.textContent = '🔴 开始录音'; btn.style.background = '#238636';
+}
+
+function gwAsrCleanup() {
+  _gw_asrRec = false;
+  if (_gw_asrProc) { try { _gw_asrProc.disconnect(); } catch(_e) {} _gw_asrProc = null; }
+  if (_gw_asrCtx) { try { _gw_asrCtx.close(); } catch(_e) {} _gw_asrCtx = null; }
+  if (_gw_asrStream) { try { _gw_asrStream.getTracks().forEach(function(t){ t.stop(); }); } catch(_e) {} _gw_asrStream = null; }
+  const btn = document.getElementById('asr-rec-btn');
+  if (btn) { btn.textContent = '🔴 开始录音'; btn.style.background = '#238636'; }
 }
 
 async function gwBuyCredits() {
@@ -395,6 +515,19 @@ export default {
 
     if (url.pathname === '/' || url.pathname === '/index.html') {
       return new Response(HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
+    // ── Realtime ASR (WebSocket) ──
+    // Browsers can't set Authorization headers on a WebSocket, so the Supabase
+    // JWT is passed as ?token=. userId is decoded (not fully verified) here — same
+    // posture as /api/credit/balance. The relay reserves a hold on connect and
+    // settles the real streamed duration on close.
+    if (url.pathname === '/api/asr/stream') {
+      const token = url.searchParams.get('token') || '';
+      let userId: string | null = null;
+      try { userId = JSON.parse(atob(token.split('.')[1])).sub || null; } catch { userId = null; }
+      if (!userId) return new Response('unauthorized', { status: 401 });
+      return handleAsrStream(request, env, userId);
     }
 
     // ── AI call ──

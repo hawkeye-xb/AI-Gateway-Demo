@@ -83,9 +83,40 @@ export class BailianClient implements IAiProviderClient {
     return { raw: { output, usage: usageData }, usage };
   }
 
+  // Offline / non-realtime ASR: synchronous recognition of an uploaded file.
+  //
+  // Model: qwen3-asr-flash. Unlike paraformer-v2 recorded transcription (async +
+  // requires a public file URL), qwen3-asr-flash accepts inline Base64 audio and
+  // returns the transcript in one synchronous multimodal-generation call — same
+  // shape as the vision path. That keeps the demo free of R2/public-bucket infra.
+  //
+  // Input contract (from the frontend, via req.input):
+  //   { audio: "data:audio/wav;base64,...."   // OR a public https URL
+  //     language?: "zh" | "en" | ... }         // optional hint
+  //
+  // Billing: usage.seconds is the audio duration reported by DashScope. We bill
+  // per audio_second, so we surface it as kind:'audio_seconds'. Falls back to
+  // audio_tokens/25 (DashScope: 25 tokens per second, min 1s) if seconds is absent.
   private async invokeAsr(req: ProviderRequest): Promise<ProviderResponse> {
-    const body = req.input as Record<string, unknown>;
-    const resp = await fetch(`${this.baseUrl}/services/audio/asr/transcription`, {
+    const input = (req.input ?? {}) as { audio?: string; language?: string };
+    const audio = input.audio;
+    if (!audio) throw new ClientInputError('Bailian ASR: missing audio (expected input.audio = data URI or URL)');
+
+    const asrOptions: Record<string, unknown> = { enable_itn: false };
+    if (input.language) asrOptions.language = input.language;
+
+    const body = {
+      model: req.model, // 'qwen3-asr-flash'
+      input: {
+        messages: [
+          { role: 'system', content: [{ text: '' }] },
+          { role: 'user', content: [{ audio }] },
+        ],
+      },
+      parameters: { asr_options: asrOptions },
+    };
+
+    const resp = await fetch(`${this.baseUrl}/services/aigc/multimodal-generation/generation`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${this.apiKey}`,
@@ -100,14 +131,26 @@ export class BailianClient implements IAiProviderClient {
     }
     const data = await resp.json() as Record<string, unknown>;
     const output = data.output as Record<string, unknown> | undefined;
-    // ASR models report duration, not tokens
-    const durationSec = ((output?.duration_ms as number) || 0) / 1000;
-    const usage: RawUsage = {
-      kind: 'audio_seconds',
-      amount: durationSec,
-      meta: data.usage || {},
-    };
-    return { raw: { output, text: output?.text }, usage };
+    const usageData = (data.usage ?? {}) as Record<string, unknown>;
+
+    // Duration for billing: prefer usage.seconds; else derive from audio_tokens.
+    let seconds = typeof usageData.seconds === 'number' ? usageData.seconds : 0;
+    if (!seconds) {
+      const details = usageData.prompt_tokens_details as Record<string, unknown> | undefined;
+      const audioTokens = details && typeof details.audio_tokens === 'number' ? details.audio_tokens : 0;
+      if (audioTokens) seconds = Math.ceil(audioTokens / 25);
+    }
+
+    // Qwen-ASR returns the transcript as an array: choices[0].message.content = [{ text: "..." }]
+    const choices = output?.choices as Array<Record<string, unknown>> | undefined;
+    const message = choices?.[0]?.message as Record<string, unknown> | undefined;
+    const content = message?.content;
+    const text = Array.isArray(content)
+      ? content.map((c) => (c && typeof (c as Record<string, unknown>).text === 'string' ? (c as Record<string, unknown>).text : '')).join('')
+      : (typeof content === 'string' ? content : '');
+
+    const usage: RawUsage = { kind: 'audio_seconds', amount: seconds, meta: usageData };
+    return { raw: { output, text }, usage };
   }
 
   async prepareFileInput(fileRef: FileRef): Promise<ProviderFileInput> {
