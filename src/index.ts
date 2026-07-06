@@ -324,7 +324,7 @@ async function gwSendVision() {
   try {
     const d = await gwApi('/api/ai/run', {
       modality:'vision', model:'qwen-vl-max', providerKey:'bailian', streaming:false,
-      payload:{model:'qwen-vl-max', input:{messages:[{role:'user', content:[{image:'data:image/jpeg;base64,'+_gw_img+'},{text:q}]}]}}
+      payload:{model:'qwen-vl-max', input:{messages:[{role:'user', content:[{image:'data:image/jpeg;base64,'+_gw_img},{text:q}]}]}}
     });
     document.getElementById('vision-result').textContent = (d.raw?.output?.choices?.[0]?.message?.content || JSON.stringify(d.raw))+'\\n\\n-'+d.cost+' credits';
     gwRefreshBalance(); gwRefreshLog();
