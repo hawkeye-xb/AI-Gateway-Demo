@@ -162,13 +162,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
       <div class="balance-value" id="balance">--</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center">
-      <select id="credit-pack" style="padding:6px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;font-size:12px">
-        <option value="1">$1 = 100K credits</option>
-        <option value="5">$5 = 500K credits</option>
-        <option value="10">$10 = 1M credits</option>
-        <option value="20">$20 = 2M credits</option>
-      </select>
-      <button onclick="gwBuyCredits()" class="btn-buy">💰 Buy</button>
+      <button onclick="gwBuyCredits()" class="btn-buy">💰 Buy $1 = 100K credits</button>
       <button onclick="gwRefreshBalance()" style="padding:8px 16px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;cursor:pointer;font-size:12px">Refresh</button>
     </div>
   </div>
@@ -362,8 +356,7 @@ async function gwSendAsr() {
 
 async function gwBuyCredits() {
   try {
-    const units = parseInt(document.getElementById('credit-pack').value) || 1;
-    const d = await gwApi('/api/payment/checkout', { units });
+    const d = await gwApi('/api/payment/checkout', {});
     window.open(d.url, '_blank');
     alert('Complete payment in the new tab, then come back and refresh balance.');
   } catch(e) { alert('Payment error: '+e.message); }
@@ -429,8 +422,6 @@ export default {
       const userId = extractUserId(request);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       try {
-        let units = 1;
-        try { const body = await request.json() as { units?: number }; if (body.units) units = body.units; } catch {}
         const isTestKey = env.CREEM_API_KEY.startsWith('creem_test_');
         const baseUrl = isTestKey ? 'https://test-api.creem.io/v1' : 'https://api.creem.io/v1';
         const resp = await fetch(baseUrl + '/checkouts', {
@@ -438,9 +429,8 @@ export default {
           headers: { 'x-api-key': env.CREEM_API_KEY, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             product_id: 'prod_vfOhDIXGlk1Dfkd8MT6AB',
-            units,
             success_url: url.origin + '/',
-            metadata: { accountId: userId, requestId: crypto.randomUUID(), units: String(units) },
+            metadata: { accountId: userId, requestId: crypto.randomUUID() },
           }),
         });
         if (!resp.ok) throw new Error(await resp.text());
