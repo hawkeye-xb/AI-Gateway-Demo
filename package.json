@@ -5,8 +5,10 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "check": "node scripts/check-html-js.js",
     "db:migrate": "wrangler d1 migrations apply ai-gateway-demo-db",
-    "db:migrate:local": "wrangler d1 migrations apply ai-gateway-demo-db --local"
+    "db:migrate:local": "wrangler d1 migrations apply ai-gateway-demo-db --local",
+    "predeploy": "node scripts/check-html-js.js"
   },
   "dependencies": {
     "jose": "^5.9.0"
