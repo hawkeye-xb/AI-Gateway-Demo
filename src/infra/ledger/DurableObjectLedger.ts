@@ -13,16 +13,27 @@ const DEMO_INITIAL_CREDITS = 1_000_000;
 export class CreditLedger extends DurableObject implements ICreditLedger {
   // In-memory cache of the persisted balance. NEVER trust this before ensureLoaded().
   private balance = 0;
-  // Reservations are transient per-request (reserve -> settle within one call),
-  // so they intentionally live in memory only.
+  // Reservations are now PERSISTED (see below). This map is a loaded cache of the
+  // 'reservations' storage key. It must survive DO eviction because a realtime ASR
+  // session reserves at connect and settles many seconds later, with NO ledger-DO
+  // activity in between — long enough for the DO to be evicted mid-session.
   private reservations = new Map<string, Reservation>();
   private loaded = false;
+
+  // Abandoned reservations (session died before settle) would otherwise hold balance
+  // forever. Ignore + prune any older than this when reserving.
+  private static readonly RESERVATION_TTL_MS = 60 * 60 * 1000; // 1 hour
 
   // ── Persistence ──────────────────────────────────────────────
   // The previous version kept `balance` in a plain instance field that reset to 0
   // every time the DO was evicted from memory (routine, after seconds/minutes of
   // inactivity) or on every `wrangler deploy`. That silently wiped top-ups and let
   // the balance drift negative. Balance now lives in this.ctx.storage (durable).
+  //
+  // Reservations were ALSO memory-only, which broke reserve→settle across an
+  // eviction (realtime streaming sessions): settle couldn't find the reservation
+  // and threw, so the charge + audit row were silently dropped. They're persisted
+  // under the 'reservations' key now.
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
     const stored = await this.ctx.storage.get<number>('balance');
@@ -34,11 +45,17 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
     } else {
       this.balance = stored;
     }
+    const storedRes = await this.ctx.storage.get<Record<string, Reservation>>('reservations');
+    if (storedRes) this.reservations = new Map(Object.entries(storedRes));
     this.loaded = true;
   }
 
   private async persistBalance(): Promise<void> {
     await this.ctx.storage.put('balance', this.balance);
+  }
+
+  private async persistReservations(): Promise<void> {
+    await this.ctx.storage.put('reservations', Object.fromEntries(this.reservations));
   }
 
   // HTTP fetch handler for stub-based calls
@@ -76,29 +93,42 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
     if (this.reservations.has(idempotencyKey)) {
       return idempotencyKey;
     }
+    // Prune abandoned reservations so a died-mid-session hold can't lock balance forever.
+    const now = Date.now();
+    let pruned = false;
+    for (const [k, r] of this.reservations) {
+      if (now - r.createdAt > CreditLedger.RESERVATION_TTL_MS) { this.reservations.delete(k); pruned = true; }
+    }
     // Available = persisted balance minus everything currently held by open reservations.
     // Previous guard `balance + estimatedCredit < 0` never triggered (estimatedCredit is
     // positive), so it provided no protection and the balance could go negative freely.
     const outstanding = [...this.reservations.values()].reduce((s, r) => s + r.amount, 0);
     const available = this.balance - outstanding;
     if (available - estimatedCredit < 0) {
+      if (pruned) await this.persistReservations();
       throw new Error(`insufficient balance: available ${available} < required ${estimatedCredit}`);
     }
-    this.reservations.set(idempotencyKey, { amount: estimatedCredit, createdAt: Date.now() });
+    this.reservations.set(idempotencyKey, { amount: estimatedCredit, createdAt: now });
+    await this.persistReservations();
     return idempotencyKey;
   }
 
   async settle(reservationId: string, actualCredit: number): Promise<void> {
     await this.ensureLoaded();
-    const reservation = this.reservations.get(reservationId);
-    if (!reservation) throw new Error(`reservation ${reservationId} not found`);
-    this.balance -= actualCredit;
-    this.reservations.delete(reservationId);
+    // Tolerant by design: even if the reservation is somehow missing (expired/pruned),
+    // still apply the real charge so billing + the audit row are never silently dropped.
+    // The caller (relay / use case) guarantees settle runs at most once per reservation.
+    const had = this.reservations.delete(reservationId);
+    this.balance = Math.max(0, this.balance - actualCredit);
     await this.persistBalance();
+    if (had) await this.persistReservations();
   }
 
   async release(reservationId: string): Promise<void> {
-    this.reservations.delete(reservationId);
+    await this.ensureLoaded();
+    if (this.reservations.delete(reservationId)) {
+      await this.persistReservations();
+    }
   }
 
   async getBalance(_accountId: string): Promise<number> {

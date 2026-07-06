@@ -257,11 +257,14 @@ async function runSession(server: WebSocket, env: RelayEnv, userId: string): Pro
   });
 
   server.addEventListener('close', () => {
-    // Client hung up: finish the task, let task-finished settle. If the upstream
-    // never answers, upstream 'close' settles instead. settleOnce is idempotent.
+    // Client hung up. Finish the upstream task AND settle now from the bytes we've
+    // already billed — don't wait for task-finished, because on an abrupt tab close
+    // the isolate may be torn down before it arrives. settleOnce is idempotent, so a
+    // normal stop (which settles via task-finished first) makes this a no-op.
     sendFinish();
+    void settleOnce('client-close');
   });
-  server.addEventListener('error', () => { sendFinish(); });
+  server.addEventListener('error', () => { sendFinish(); void settleOnce('client-error'); });
 
   // ── 4. Kick off the recognition task ──────────────────────────────────────
   upstream.send(JSON.stringify({
