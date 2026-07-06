@@ -246,7 +246,9 @@ async function apiCall(path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (resp.status === 401) { logout(); throw new Error('Session expired'); }
-  return resp.json();
+  const data = await resp.json();
+  if (data.error) throw new Error(data.error);
+  return data;
 }
 
 async function refreshBalance() {
@@ -387,6 +389,11 @@ export default {
 
     // API routes
     if (url.pathname === '/api/ai/run') {
+      // Auto-init credits if depleted
+      const ledgerInit = new CreditLedgerStub(env.CREDIT_LEDGER);
+      const bal = await ledgerInit.getBalance('demo-user');
+      if (bal < 100) await ledgerInit.topUp('demo-user', 10000, 'auto-init');
+
       const useCase = buildUseCase(env);
       const transport = new HttpTransportAdapter();
       try {
@@ -401,7 +408,8 @@ export default {
 
     if (url.pathname === '/api/credit/balance') {
       const ledger = new CreditLedgerStub(env.CREDIT_LEDGER);
-      const balance = await ledger.getBalance('demo-user');
+      let balance = await ledger.getBalance('demo-user');
+      if (balance < 100) { await ledger.topUp('demo-user', 10000, 'auto-init'); balance = 10000; }
       return Response.json({ balance }, { headers: { 'Access-Control-Allow-Origin': '*' } });
     }
 
