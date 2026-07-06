@@ -162,7 +162,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
       <div class="balance-value" id="balance">--</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center">
-      <button onclick="gwBuyCredits()" class="btn-buy">💰 Buy $1 = 100K credits</button>
+      <select id="credit-pack" style="padding:6px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;font-size:12px">
+        <option value="1">1M credits ($1)</option>
+        <option value="5">5M credits ($1)</option>
+        <option value="10">10M credits ($1)</option>
+        <option value="50">50M credits ($1)</option>
+      </select>
+      <button onclick="gwBuyCredits()" class="btn-buy">💰 Buy</button>
       <button onclick="gwRefreshBalance()" style="padding:8px 16px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;cursor:pointer;font-size:12px">Refresh</button>
     </div>
   </div>
@@ -356,7 +362,8 @@ async function gwSendAsr() {
 
 async function gwBuyCredits() {
   try {
-    const d = await gwApi('/api/payment/checkout', {});
+    const mult = document.getElementById('credit-pack').value;
+    const d = await gwApi('/api/payment/checkout', { credits_mult: parseInt(mult) });
     window.open(d.url, '_blank');
     alert('Complete payment in the new tab, then come back and refresh balance.');
   } catch(e) { alert('Payment error: '+e.message); }
@@ -422,6 +429,8 @@ export default {
       const userId = extractUserId(request);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       try {
+        let creditsMult = 1;
+        try { const body = await request.json() as { credits_mult?: number }; if (body.credits_mult) creditsMult = body.credits_mult; } catch {}
         const isTestKey = env.CREEM_API_KEY.startsWith('creem_test_');
         const baseUrl = isTestKey ? 'https://test-api.creem.io/v1' : 'https://api.creem.io/v1';
         const resp = await fetch(baseUrl + '/checkouts', {
@@ -430,7 +439,7 @@ export default {
           body: JSON.stringify({
             product_id: 'prod_vfOhDIXGlk1Dfkd8MT6AB',
             success_url: url.origin + '/',
-            metadata: { accountId: userId, requestId: crypto.randomUUID() },
+            metadata: { accountId: userId, requestId: crypto.randomUUID(), credits: String(creditsMult * 1000000) },
           }),
         });
         if (!resp.ok) throw new Error(await resp.text());
@@ -465,9 +474,9 @@ export default {
 
         // Top up
         if (eventType === 'checkout.completed') {
-          const units = parseInt(payload.object?.metadata?.units || '1') || 1;
+          const credits = parseInt(payload.object?.metadata?.credits || '1000000') || 1000000;
           const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, accountId);
-          await ledger.topUp(accountId, 100000 * units, 'creem-' + externalEventId); // 100,000 credits for demo pack
+          await ledger.topUp(accountId, credits, 'creem-' + externalEventId); // 100,000 credits for demo pack
         }
 
         return Response.json({ ok: true });
