@@ -198,35 +198,35 @@ const SUPABASE_URL = 'https://cdfcboqhirhadzykeeey.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_L3tlauTO-QrKwseMijNGlQ_XiJAbSLR';
 const API_BASE = '';
 
-let sb, session, currentTab = 'llm', imageBase64 = null, audioBase64 = null;
+let mySupabase, mySession, currentTab = 'llm', imageBase64 = null, audioBase64 = null;
 
 function initSupabase() {
-  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  sb.auth.onAuthStateChange((event, sess) => {
-    if (sess) { session = sess; showApp(); } else { showLogin(); }
+  mySupabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  mySupabase.auth.onAuthStateChange((_event, sess) => {
+    if (sess) { mySession = sess; showApp(); } else { showLogin(); }
   });
-  sb.auth.getSession().then(({ data }) => {
-    if (data.session) { session = data.session; showApp(); }
+  mySupabase.auth.getSession().then(({ data }) => {
+    if (data.session) { mySession = data.session; showApp(); }
   });
 }
 
 async function login() {
   const email = document.getElementById('email').value;
   const password = document.getElementById('password').value;
-  const { error } = await sb.auth.signInWithPassword({ email, password });
-  if (error && error.message.includes('Invalid')) {
-    const { error: signUpErr } = await sb.auth.signUp({ email, password });
-    if (signUpErr) { alert(signUpErr.message); return; }
+  const { error } = await mySupabase.auth.signInWithPassword({ email, password });
+  if (error != null && error.message.includes('Invalid')) {
+    const { error: signUpErr } = await mySupabase.auth.signUp({ email, password });
+    if (signUpErr != null) { alert(signUpErr.message); return; }
     alert('Account created! Check your email to confirm, then login.');
-  } else if (error) { alert(error.message); }
+  } else if (error != null) { alert(error.message); }
 }
 
-async function logout() { await sb.auth.signOut(); }
+async function logout() { await mySupabase.auth.signOut(); }
 
 function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app-screen').style.display = 'block';
-  document.getElementById('user-email').textContent = session.user.email;
+  document.getElementById('user-email').textContent = mySession.user.email;
   refreshBalance();
   refreshLog();
 }
@@ -241,7 +241,7 @@ async function apiCall(path, body) {
     method: body ? 'POST' : 'GET',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + session.access_token,
+      'Authorization': 'Bearer ' + mySession.access_token,
     },
     body: body ? JSON.stringify(body) : undefined,
   });
