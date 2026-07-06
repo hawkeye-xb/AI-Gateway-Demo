@@ -14,7 +14,14 @@ export class D1PriceBook implements IPriceBook {
       `SELECT provider, model, modality, unit, raw_cost_per_unit, markup_multiplier, min_charge_per_call, effective_from
        FROM price_book
        WHERE provider = ? AND model = ? AND modality = ? AND effective_from <= ?
-       ORDER BY effective_from DESC
+       ORDER BY effective_from DESC,
+         CASE unit
+           WHEN 'input_token'  THEN 0
+           WHEN 'audio_second' THEN 0
+           WHEN 'output_token' THEN 1
+           WHEN 'image'        THEN 3
+           ELSE 2
+         END
        LIMIT 1`
     ).bind(provider, model, modality, at).first<Record<string, unknown>>();
 

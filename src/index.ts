@@ -335,7 +335,9 @@ async function gwSendVision() {
       modality:'vision', model:'qwen-vl-max', providerKey:'bailian', streaming:false,
       payload:{model:'qwen-vl-max', input:{messages:[{role:'user', content:[{image:'data:image/jpeg;base64,'+_gw_img},{text:q}]}]}}
     });
-    document.getElementById('vision-result').textContent = (d.raw?.output?.choices?.[0]?.message?.content || JSON.stringify(d.raw))+'\\n\\n-'+d.cost+' credits';
+    var _vc = d.raw && d.raw.output && d.raw.output.choices && d.raw.output.choices[0] && d.raw.output.choices[0].message ? d.raw.output.choices[0].message.content : null;
+    var _vt = Array.isArray(_vc) ? _vc.map(function(x){ return (x && x.text) ? x.text : ''; }).join('') : (typeof _vc === 'string' ? _vc : JSON.stringify(d.raw));
+    document.getElementById('vision-result').textContent = _vt+'\\n\\n-'+d.cost+' credits';
     gwRefreshBalance(); gwRefreshLog();
   } catch(e) { document.getElementById('vision-result').textContent = 'Error: '+e.message; }
   document.getElementById('vision-send').disabled = false;
