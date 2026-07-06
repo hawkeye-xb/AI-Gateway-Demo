@@ -5,16 +5,17 @@ import type { ICreditLedger } from '../domain/ICreditLedger';
 import type { IAuditSink } from '../domain/IAuditSink';
 import type { ITransportAdapter } from '../domain/ITransportAdapter';
 import type { IUsageExtractor } from '../domain/IUsageExtractor';
-import type { IRatePlan } from '../domain/IRatePlan';
-import type { NormalizedRequest } from '../domain/types';
+import type { IRatePlan, IPriceBook, PriceBookEntry } from '../domain/IRatePlan';
+import type { NormalizedRequest, Modality } from '../domain/types';
 
 export class AiCallUseCase {
   constructor(
     private auth: IAuthProvider,
     private ledger: ICreditLedger,
     private providers: Map<string, IAiProviderClient>,
-    private usageExtractors: Map<string, IUsageExtractor>, // key: modality
-    private ratePlans: Map<string, IRatePlan>,             // key: model
+    private usageExtractors: Map<string, IUsageExtractor>,
+    private priceBook: IPriceBook,
+    private ratePlan: IRatePlan,
     private audit: IAuditSink,
   ) {}
 
@@ -27,7 +28,7 @@ export class AiCallUseCase {
       return Response.json({ error: 'unauthorized' }, { status: 401 });
     }
 
-    const accountId = identity.userId; // personal account = userId
+    const accountId = identity.userId;
 
     // Estimate and reserve
     const estimated = this.estimate(req);
@@ -43,14 +44,18 @@ export class AiCallUseCase {
         input: req.payload,
       });
 
-      const usage = this.usageExtractors.get(req.modality)?.extract(resp)
-        ?? resp.usage;
+      const usage = this.usageExtractors.get(req.modality)?.extract(resp) ?? resp.usage;
 
-      const ratePlan = this.ratePlans.get(req.model);
-      // Fallback: simple token-based rate
-      const cost = ratePlan
-        ? ratePlan.toCredit(usage, { rawCostPerUnit: 0, markupMultiplier: 1, minChargePerCall: 1 } as any)
-        : Math.ceil(usage.amount * 1);
+      // Look up real price from D1
+      const entry = await this.priceBook.getEntry(req.providerKey, req.model, req.modality, Date.now());
+      const cost = entry
+        ? this.ratePlan.toCredit(usage, entry)
+        : Math.ceil(usage.amount * 1); // fallback: 1 credit per unit
+
+      // Calculate real cost in USD
+      const realCostUsd = entry
+        ? usage.amount * entry.rawCostPerUnit
+        : 0;
 
       await this.ledger.settle(reservationId, cost);
       await this.audit.record({
@@ -61,7 +66,7 @@ export class AiCallUseCase {
         provider: req.providerKey,
         usage,
         cost,
-        realCostUsd: 0, // simplified for demo
+        realCostUsd,
         timestamp: Date.now(),
       });
 
@@ -70,17 +75,6 @@ export class AiCallUseCase {
       if (e instanceof PartialFailureError) {
         const cost = Math.ceil(e.partialUsage.amount * 1);
         await this.ledger.settle(reservationId, cost);
-        await this.audit.record({
-          requestId: req.requestId,
-          accountId,
-          modality: req.modality,
-          model: req.model,
-          provider: req.providerKey,
-          usage: e.partialUsage,
-          cost,
-          realCostUsd: 0,
-          timestamp: Date.now(),
-        });
       } else if (e instanceof Error && 'releaseReservation' in e) {
         const pe = e as unknown as ProviderCallError;
         if (pe.releaseReservation) await this.ledger.release(reservationId);
@@ -91,8 +85,7 @@ export class AiCallUseCase {
     }
   }
 
-  private estimate(req: NormalizedRequest): number {
-    // Simple estimation: 10 credits per call minimum
-    return 10;
+  private estimate(_req: NormalizedRequest): number {
+    return 100; // reasonable buffer for LLM calls
   }
 }

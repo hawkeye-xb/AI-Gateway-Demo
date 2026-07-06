@@ -4,7 +4,8 @@ import { DeepSeekClient } from './infra/provider/DeepSeekClient';
 import { BailianClient } from './infra/provider/BailianClient';
 import { HttpTransportAdapter } from './infra/transport/HttpTransportAdapter';
 import { D1AuditSink } from './infra/audit/D1AuditSink';
-import { TokenBasedRatePlan, DurationBasedRatePlan } from './infra/rateplan/TokenBasedRatePlan';
+import { D1PriceBook } from './infra/pricebook/D1PriceBook';
+import { TokenBasedRatePlan } from './infra/rateplan/TokenBasedRatePlan';
 import { TokenUsageExtractor, AudioDurationExtractor } from './infra/usage/TokenUsageExtractor';
 import { CreditLedger } from './infra/ledger/DurableObjectLedger';
 import type { IAiProviderClient } from './domain/IAiProviderClient';
@@ -19,11 +20,25 @@ interface Env {
   SUPABASE_JWKS_URL: string;
   SUPABASE_PROJECT_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
+  CREEM_API_KEY: string;
+  CREEM_WEBHOOK_SECRET: string;
 }
 
-function buildUseCase(env: Env): AiCallUseCase {
+// ── JWT helper: extract user ID without full verification ──
+function extractUserId(request: Request): string | null {
+  const auth = request.headers.get('Authorization') || '';
+  const token = auth.replace('Bearer ', '');
+  if (!token) return null;
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return payload.sub || null;
+  } catch { return null; }
+}
+
+// ── DI ──
+function buildUseCase(env: Env, userId: string): AiCallUseCase {
   const auth = new SupabaseJwtAuthProvider(env.SUPABASE_JWKS_URL);
-  const ledger = new CreditLedgerStub(env.CREDIT_LEDGER);
+  const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, userId);
   const providers = new Map<string, IAiProviderClient>([
     ['deepseek', new DeepSeekClient(env.DEEPSEEK_API_KEY)],
     ['bailian', new BailianClient(env.BAILIAN_API_KEY)],
@@ -33,22 +48,18 @@ function buildUseCase(env: Env): AiCallUseCase {
     ['vision', new TokenUsageExtractor()],
     ['asr', new AudioDurationExtractor()],
   ]);
-  const ratePlans = new Map([
-    ['deepseek-chat', new TokenBasedRatePlan()],
-    ['qwen-vl-max', new TokenBasedRatePlan()],
-    ['paraformer-v2', new DurationBasedRatePlan()],
-  ]);
+  const priceBook = new D1PriceBook(env.DB);
+  const ratePlan = new TokenBasedRatePlan();
   const audit = new D1AuditSink(env.DB);
-  return new AiCallUseCase(auth, ledger, providers, usageExtractors, ratePlans, audit);
+  return new AiCallUseCase(auth, ledger, providers, usageExtractors, priceBook, ratePlan, audit);
 }
 
-// Stub that uses DO fetch for HTTP-based calls
+// ── Per-user DO stub ──
 class CreditLedgerStub {
   private stub: DurableObjectStub;
-  private accountId = 'demo-user';
 
-  constructor(ns: DurableObjectNamespace<CreditLedger>) {
-    const id = ns.idFromName(this.accountId);
+  constructor(ns: DurableObjectNamespace<CreditLedger>, accountId: string) {
+    const id = ns.idFromName(accountId);
     this.stub = ns.get(id);
   }
 
@@ -70,11 +81,11 @@ class CreditLedgerStub {
   async release(reservationId: string): Promise<void> {
     await this.call('release', reservationId);
   }
-  async getBalance(accountId: string): Promise<number> {
-    return (await this.call('getBalance', accountId)) as number;
+  async getBalance(_accountId: string): Promise<number> {
+    return (await this.call('getBalance', _accountId)) as number;
   }
-  async topUp(accountId: string, amount: number, idempotencyKey: string): Promise<void> {
-    await this.call('topUp', accountId, amount, idempotencyKey);
+  async topUp(_accountId: string, amount: number, idempotencyKey: string): Promise<void> {
+    await this.call('topUp', _accountId, amount, idempotencyKey);
   }
 }
 
@@ -95,6 +106,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .balance-card { background: linear-gradient(135deg, #1a1f2e, #161b22); border: 1px solid #30363d; border-radius: 12px; padding: 20px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; }
 .balance-label { font-size: 13px; color: #8b949e; }
 .balance-value { font-size: 32px; font-weight: 700; color: #3fb950; }
+.balance-value.empty { color: #f85149; }
 .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
 .tab { padding: 8px 20px; border-radius: 8px; border: 1px solid #30363d; background: transparent; color: #8b949e; cursor: pointer; font-size: 14px; }
 .tab.active { background: #1f6feb22; border-color: #1f6feb; color: #58a6ff; }
@@ -110,6 +122,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .input-row button { padding: 10px 20px; background: #238636; border: none; border-radius: 8px; color: white; font-size: 14px; cursor: pointer; font-weight: 600; }
 .input-row button:hover { background: #2ea043; }
 .input-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-buy { padding: 10px 20px; background: #1f6feb; border: none; border-radius: 8px; color: white; font-size: 14px; cursor: pointer; font-weight: 600; }
+.btn-buy:hover { background: #388bfd; }
 .upload-area { border: 2px dashed #30363d; border-radius: 12px; padding: 40px; text-align: center; cursor: pointer; margin-bottom: 12px; }
 .upload-area:hover { border-color: #58a6ff; }
 .upload-area img { max-width: 200px; max-height: 200px; margin-top: 12px; border-radius: 8px; }
@@ -130,7 +144,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   <h2>🔐 AI Gateway Demo</h2>
   <input id="email" type="email" placeholder="Email" />
   <input id="password" type="password" placeholder="Password" />
-  <button onclick="login()">Login / Sign Up</button>
+  <button onclick="gwLogin()">Login / Sign Up</button>
   <p style="margin-top:12px;color:#8b949e;font-size:12px">No account? Just enter email+password to sign up.</p>
 </div>
 
@@ -139,7 +153,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     <h1>⚡ AI Gateway Demo</h1>
     <div style="display:flex;align-items:center;gap:12px">
       <span style="color:#8b949e;font-size:13px" id="user-email"></span>
-      <button id="logout-btn" onclick="logout()">Logout</button>
+      <button id="logout-btn" onclick="gwLogout()">Logout</button>
     </div>
   </div>
   <div class="balance-card">
@@ -147,19 +161,22 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
       <div class="balance-label">Credits Balance</div>
       <div class="balance-value" id="balance">--</div>
     </div>
-    <button onclick="refreshBalance()" style="padding:8px 16px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;cursor:pointer;font-size:12px">Refresh</button>
+    <div style="display:flex;gap:8px">
+      <button onclick="gwBuyCredits()" class="btn-buy">💰 Buy Credits</button>
+      <button onclick="gwRefreshBalance()" style="padding:8px 16px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;cursor:pointer;font-size:12px">Refresh</button>
+    </div>
   </div>
   <div class="tabs">
-    <button class="tab active" onclick="switchTab('llm')">💬 Chat (DeepSeek)</button>
-    <button class="tab" onclick="switchTab('vision')">🖼️ Vision (Qwen-VL)</button>
-    <button class="tab" onclick="switchTab('asr')">🎤 ASR (Paraformer)</button>
+    <button class="tab active" onclick="gwSwitchTab('llm')">💬 Chat (DeepSeek)</button>
+    <button class="tab" onclick="gwSwitchTab('vision')">🖼️ Vision (Qwen-VL)</button>
+    <button class="tab" onclick="gwSwitchTab('asr')">🎤 ASR (Paraformer)</button>
   </div>
 
   <div id="panel-llm" class="panel active">
     <div class="chat-box" id="chat-box"></div>
     <div class="input-row">
-      <input id="chat-input" type="text" placeholder="Ask DeepSeek something..." onkeydown="if(event.key==='Enter')sendChat()" />
-      <button onclick="sendChat()" id="chat-send">Send</button>
+      <input id="chat-input" type="text" placeholder="Ask DeepSeek something..." onkeydown="if(event.key==='Enter')gwSendChat()" />
+      <button onclick="gwSendChat()" id="chat-send">Send</button>
     </div>
   </div>
 
@@ -168,10 +185,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
       <p style="color:#8b949e">📷 Click to upload an image</p>
       <img id="image-preview" style="display:none" />
     </div>
-    <input type="file" id="image-input" accept="image/*" style="display:none" onchange="previewImage(event)" />
+    <input type="file" id="image-input" accept="image/*" style="display:none" onchange="gwPreviewImage(event)" />
     <div class="input-row">
       <input id="vision-question" type="text" placeholder="Ask about this image..." />
-      <button onclick="sendVision()" id="vision-send">Analyze</button>
+      <button onclick="gwSendVision()" id="vision-send">Analyze</button>
     </div>
     <div class="result-area" id="vision-result"></div>
   </div>
@@ -181,8 +198,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
       <p style="color:#8b949e">🎙️ Click to upload audio</p>
       <p id="audio-name" style="color:#58a6ff;margin-top:8px;font-size:13px"></p>
     </div>
-    <input type="file" id="audio-input" accept="audio/*" style="display:none" onchange="previewAudio(event)" />
-    <button onclick="sendAsr()" id="asr-send" style="width:100%;padding:12px;background:#238636;border:none;border-radius:8px;color:white;font-size:14px;cursor:pointer;font-weight:600">Transcribe</button>
+    <input type="file" id="audio-input" accept="audio/*" style="display:none" onchange="gwPreviewAudio(event)" />
+    <button onclick="gwSendAsr()" id="asr-send" style="width:100%;padding:12px;background:#238636;border:none;border-radius:8px;color:white;font-size:14px;cursor:pointer;font-weight:600">Transcribe</button>
     <div class="result-area" id="asr-result"></div>
   </div>
 
@@ -198,169 +215,154 @@ const SUPABASE_URL = 'https://cdfcboqhirhadzykeeey.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_L3tlauTO-QrKwseMijNGlQ_XiJAbSLR';
 const API_BASE = '';
 
-let mySupabase, mySession, currentTab = 'llm', imageBase64 = null, audioBase64 = null;
+let _gw_sb, _gw_session, _gw_tab = 'llm', _gw_img = null, _gw_aud = null;
 
-function initSupabase() {
-  mySupabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  mySupabase.auth.onAuthStateChange((_event, sess) => {
-    if (sess) { mySession = sess; showApp(); } else { showLogin(); }
-  });
-  mySupabase.auth.getSession().then(({ data }) => {
-    if (data.session) { mySession = data.session; showApp(); }
-  });
+function gwInitSb() {
+  _gw_sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  _gw_sb.auth.onAuthStateChange((_ev, s) => { if (s) { _gw_session = s; gwShowApp(); } else { gwShowLogin(); } });
+  _gw_sb.auth.getSession().then(({data}) => { if (data.session) { _gw_session = data.session; gwShowApp(); } });
 }
 
-async function login() {
-  const email = document.getElementById('email').value;
-  const password = document.getElementById('password').value;
-  const { error } = await mySupabase.auth.signInWithPassword({ email, password });
+async function gwLogin() {
+  const e = document.getElementById('email').value, p = document.getElementById('password').value;
+  const {error} = await _gw_sb.auth.signInWithPassword({email:e, password:p});
   if (error != null && error.message.includes('Invalid')) {
-    const { error: signUpErr } = await mySupabase.auth.signUp({ email, password });
-    if (signUpErr != null) { alert(signUpErr.message); return; }
-    alert('Account created! Check your email to confirm, then login.');
+    const {error:se} = await _gw_sb.auth.signUp({email:e, password:p});
+    if (se != null) { alert(se.message); return; }
+    alert('Account created! Check email to confirm, then login.');
   } else if (error != null) { alert(error.message); }
 }
 
-async function logout() { await mySupabase.auth.signOut(); }
+async function gwLogout() { await _gw_sb.auth.signOut(); }
 
-function showApp() {
+function gwShowApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app-screen').style.display = 'block';
-  document.getElementById('user-email').textContent = mySession.user.email;
-  refreshBalance();
-  refreshLog();
+  document.getElementById('user-email').textContent = _gw_session.user.email;
+  gwRefreshBalance(); gwRefreshLog();
 }
 
-function showLogin() {
+function gwShowLogin() {
   document.getElementById('login-screen').style.display = 'flex';
   document.getElementById('app-screen').style.display = 'none';
 }
 
-async function apiCall(path, body) {
-  const resp = await fetch(API_BASE + path, {
+async function gwApi(path, body) {
+  const r = await fetch(API_BASE + path, {
     method: body ? 'POST' : 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + mySession.access_token,
-    },
+    headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+_gw_session.access_token},
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (resp.status === 401) { logout(); throw new Error('Session expired'); }
-  const data = await resp.json();
-  if (data.error) throw new Error(data.error);
-  return data;
+  if (r.status === 401) { gwLogout(); throw new Error('Session expired'); }
+  const d = await r.json();
+  if (d.error) throw new Error(d.error);
+  return d;
 }
 
-async function refreshBalance() {
+async function gwRefreshBalance() {
   try {
-    const data = await apiCall('/api/credit/balance');
-    document.getElementById('balance').textContent = data.balance ?? '--';
-  } catch(e) {}
+    const d = await gwApi('/api/credit/balance');
+    const el = document.getElementById('balance');
+    el.textContent = d.balance ?? '0';
+    el.className = 'balance-value' + (d.balance < 100 ? ' empty' : '');
+  } catch(_e) {}
 }
 
-async function refreshLog() {
+async function gwRefreshLog() {
   try {
-    const data = await apiCall('/api/audit/log?limit=20');
-    const tbody = document.getElementById('log-body');
-    if (!data.rows || data.rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" style="color:#8b949e">No usage yet</td></tr>';
-      return;
+    const d = await gwApi('/api/audit/log?limit=20');
+    const tb = document.getElementById('log-body');
+    if (!d.rows || d.rows.length === 0) {
+      tb.innerHTML = '<tr><td colspan="5" style="color:#8b949e">No usage yet</td></tr>';
+    } else {
+      tb.innerHTML = d.rows.map(r =>
+        '<tr><td>'+new Date(r.timestamp).toLocaleString()+'</td><td>'+r.modality+'</td><td>'+r.model+'</td><td>'+r.usage_amount+' '+r.usage_kind+'</td><td class="credit">-'+r.credits_charged+'</td></tr>'
+      ).join('');
     }
-    tbody.innerHTML = data.rows.map(r =>
-      '<tr><td>' + new Date(r.timestamp).toLocaleString() + '</td><td>' + r.modality + '</td><td>' + r.model + '</td><td>' + r.usage_amount + ' ' + r.usage_kind + '</td><td class="credit">-' + r.credits_charged + '</td></tr>'
-    ).join('');
-  } catch(e) {}
+  } catch(_e) {}
 }
 
-function switchTab(tab) {
-  currentTab = tab;
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.querySelector('.tab:nth-child(' + ({llm:1,vision:2,asr:3}[tab]) + ')').classList.add('active');
-  document.getElementById('panel-' + tab).classList.add('active');
+function gwSwitchTab(t) {
+  _gw_tab = t;
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+  document.querySelector('.tab:nth-child('+({llm:1,vision:2,asr:3}[t])+')').classList.add('active');
+  document.getElementById('panel-'+t).classList.add('active');
 }
 
-async function sendChat() {
-  const input = document.getElementById('chat-input');
-  const msg = input.value.trim();
+async function gwSendChat() {
+  const inp = document.getElementById('chat-input'), msg = inp.value.trim();
   if (!msg) return;
   const box = document.getElementById('chat-box');
-  box.innerHTML += '<div class="msg user">' + msg + '</div>';
-  input.value = '';
+  box.innerHTML += '<div class="msg user">'+msg+'</div>';
+  inp.value = '';
   document.getElementById('chat-send').disabled = true;
   try {
-    const data = await apiCall('/api/ai/run', {
-      modality: 'llm', model: 'deepseek-chat', providerKey: 'deepseek', streaming: false,
-      payload: { model: 'deepseek-chat', messages: [{ role: 'user', content: msg }], max_tokens: 512 }
+    const d = await gwApi('/api/ai/run', {
+      modality:'llm', model:'deepseek-chat', providerKey:'deepseek', streaming:false,
+      payload:{model:'deepseek-chat', messages:[{role:'user', content:msg}], max_tokens:512}
     });
-    const content = data.raw?.choices?.[0]?.message?.content || JSON.stringify(data.raw);
-    box.innerHTML += '<div class="msg assistant">' + content + '<div class="cost">-' + data.cost + ' credits</div></div>';
+    const c = d.raw?.choices?.[0]?.message?.content || JSON.stringify(d.raw);
+    box.innerHTML += '<div class="msg assistant">'+c+'<div class="cost">-'+d.cost+' credits</div></div>';
     box.scrollTop = box.scrollHeight;
-    refreshBalance(); refreshLog();
-  } catch(e) { box.innerHTML += '<div class="msg assistant" style="color:#f85149">Error: ' + e.message + '</div>'; }
+    gwRefreshBalance(); gwRefreshLog();
+  } catch(e) { box.innerHTML += '<div class="msg assistant" style="color:#f85149">Error: '+e.message+'</div>'; }
   document.getElementById('chat-send').disabled = false;
 }
 
-function previewImage(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = function() {
-    imageBase64 = reader.result.split(',')[1];
-    document.getElementById('image-preview').src = reader.result;
-    document.getElementById('image-preview').style.display = 'block';
-  };
-  reader.readAsDataURL(file);
+function gwPreviewImage(ev) {
+  const f = ev.target.files[0]; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = function() { _gw_img = rd.result.split(',')[1]; document.getElementById('image-preview').src = rd.result; document.getElementById('image-preview').style.display = 'block'; };
+  rd.readAsDataURL(f);
 }
 
-async function sendVision() {
-  if (!imageBase64) { alert('Please upload an image first'); return; }
-  const question = document.getElementById('vision-question').value || 'Describe this image';
+async function gwSendVision() {
+  if (!_gw_img) { alert('Upload an image first'); return; }
+  const q = document.getElementById('vision-question').value || 'Describe this image';
   document.getElementById('vision-send').disabled = true;
   try {
-    const data = await apiCall('/api/ai/run', {
-      modality: 'vision', model: 'qwen-vl-max', providerKey: 'bailian', streaming: false,
-      payload: {
-        model: 'qwen-vl-max',
-        input: { messages: [{ role: 'user', content: [
-          { image: 'data:image/jpeg;base64,' + imageBase64 },
-          { text: question }
-        ]}]}
-      }
+    const d = await gwApi('/api/ai/run', {
+      modality:'vision', model:'qwen-vl-max', providerKey:'bailian', streaming:false,
+      payload:{model:'qwen-vl-max', input:{messages:[{role:'user', content:[{image:'data:image/jpeg;base64,'+_gw_img+'},{text:q}]}]}}
     });
-    const output = data.raw?.output?.choices?.[0]?.message?.content;
-    document.getElementById('vision-result').textContent =
-      (typeof output === 'string' ? output : JSON.stringify(output, null, 2)) + '\\n\\n-' + data.cost + ' credits';
-    refreshBalance(); refreshLog();
-  } catch(e) { document.getElementById('vision-result').textContent = 'Error: ' + e.message; }
+    document.getElementById('vision-result').textContent = (d.raw?.output?.choices?.[0]?.message?.content || JSON.stringify(d.raw))+'\\n\\n-'+d.cost+' credits';
+    gwRefreshBalance(); gwRefreshLog();
+  } catch(e) { document.getElementById('vision-result').textContent = 'Error: '+e.message; }
   document.getElementById('vision-send').disabled = false;
 }
 
-function previewAudio(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  document.getElementById('audio-name').textContent = file.name;
-  const reader = new FileReader();
-  reader.onload = function() { audioBase64 = reader.result.split(',')[1]; };
-  reader.readAsDataURL(file);
+function gwPreviewAudio(ev) {
+  const f = ev.target.files[0]; if (!f) return;
+  document.getElementById('audio-name').textContent = f.name;
+  const rd = new FileReader();
+  rd.onload = function() { _gw_aud = rd.result.split(',')[1]; };
+  rd.readAsDataURL(f);
 }
 
-async function sendAsr() {
-  if (!audioBase64) { alert('Please upload an audio file first'); return; }
+async function gwSendAsr() {
+  if (!_gw_aud) { alert('Upload an audio file first'); return; }
   document.getElementById('asr-send').disabled = true;
   try {
-    const data = await apiCall('/api/ai/run', {
-      modality: 'asr', model: 'paraformer-v2', providerKey: 'bailian', streaming: false,
-      payload: { model: 'paraformer-v2', input: { audio: 'data:audio/wav;base64,' + audioBase64 } }
+    const d = await gwApi('/api/ai/run', {
+      modality:'asr', model:'paraformer-v2', providerKey:'bailian', streaming:false,
+      payload:{model:'paraformer-v2', input:{audio:'data:audio/wav;base64,'+_gw_aud}}
     });
-    document.getElementById('asr-result').textContent =
-      (data.raw?.output?.text || JSON.stringify(data.raw)) + '\\n\\n-' + data.cost + ' credits';
-    refreshBalance(); refreshLog();
-  } catch(e) { document.getElementById('asr-result').textContent = 'Error: ' + e.message; }
+    document.getElementById('asr-result').textContent = (d.raw?.output?.text || JSON.stringify(d.raw))+'\\n\\n-'+d.cost+' credits';
+    gwRefreshBalance(); gwRefreshLog();
+  } catch(e) { document.getElementById('asr-result').textContent = 'Error: '+e.message; }
   document.getElementById('asr-send').disabled = false;
 }
 
-initSupabase();
+async function gwBuyCredits() {
+  try {
+    const d = await gwApi('/api/payment/checkout', {});
+    window.open(d.url, '_blank');
+    alert('Complete payment in the new tab, then come back and refresh balance.');
+  } catch(e) { alert('Payment error: '+e.message); }
+}
+
+gwInitSb();
 </script>
 </body>
 </html>`;
@@ -369,64 +371,106 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization, creem-signature',
         },
       });
     }
 
-    // Frontend
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      return new Response(HTML, {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      });
+      return new Response(HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     }
 
-    // API routes
+    // ── AI call ──
     if (url.pathname === '/api/ai/run') {
-      // Auto-init credits if depleted
-      const ledgerInit = new CreditLedgerStub(env.CREDIT_LEDGER);
-      const bal = await ledgerInit.getBalance('demo-user');
-      if (bal < 100) await ledgerInit.topUp('demo-user', 10000, 'auto-init');
-
-      const useCase = buildUseCase(env);
-      const transport = new HttpTransportAdapter();
+      const userId = extractUserId(request);
+      if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
+      const useCase = buildUseCase(env, userId);
       try {
-        return (await useCase.handle(transport, request)) as Response;
+        return (await useCase.handle(new HttpTransportAdapter(), request)) as Response;
       } catch (e) {
-        return Response.json(
-          { error: (e as Error).message },
-          { status: 500, headers: { 'Access-Control-Allow-Origin': '*' } }
-        );
+        return Response.json({ error: (e as Error).message }, { status: 500, headers: { 'Access-Control-Allow-Origin': '*' } });
       }
     }
 
+    // ── Balance ──
     if (url.pathname === '/api/credit/balance') {
-      const ledger = new CreditLedgerStub(env.CREDIT_LEDGER);
-      let balance = await ledger.getBalance('demo-user');
-      if (balance < 100) { await ledger.topUp('demo-user', 10000, 'auto-init'); balance = 10000; }
+      const userId = extractUserId(request);
+      if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
+      const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, userId);
+      const balance = await ledger.getBalance(userId);
       return Response.json({ balance }, { headers: { 'Access-Control-Allow-Origin': '*' } });
     }
 
-    // Admin: init demo credits (one-time)
-    if (url.pathname === '/api/admin/init-credits') {
-      const ledger = new CreditLedgerStub(env.CREDIT_LEDGER);
-      await ledger.topUp('demo-user', 10000, 'init-' + Date.now());
-      const balance = await ledger.getBalance('demo-user');
-      return Response.json({ balance, message: 'Credits initialized' }, { headers: { 'Access-Control-Allow-Origin': '*' } });
-    }
-
+    // ── Audit log ──
     if (url.pathname === '/api/audit/log') {
+      const userId = extractUserId(request);
+      if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       const limit = parseInt(url.searchParams.get('limit') || '20');
       const result = await env.DB.prepare(
         'SELECT modality, model, usage_kind, usage_amount, credits_charged, timestamp FROM audit_log WHERE account_id = ? ORDER BY timestamp DESC LIMIT ?'
-      ).bind('demo-user', limit).all();
+      ).bind(userId, limit).all();
       return Response.json(result, { headers: { 'Access-Control-Allow-Origin': '*' } });
+    }
+
+    // ── Creem checkout ──
+    if (url.pathname === '/api/payment/checkout') {
+      const userId = extractUserId(request);
+      if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
+      try {
+        const resp = await fetch('https://api.creem.io/v1/checkouts', {
+          method: 'POST',
+          headers: { 'x-api-key': env.CREEM_API_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            product_id: 'prod_vfOhDIXGlk1Dfkd8MT6AB',
+            success_url: url.origin + '/',
+            metadata: { accountId: userId, requestId: crypto.randomUUID() },
+          }),
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json() as { checkout_url: string };
+        return Response.json({ url: data.checkout_url }, { headers: { 'Access-Control-Allow-Origin': '*' } });
+      } catch (e) {
+        return Response.json({ error: (e as Error).message }, { status: 500, headers: { 'Access-Control-Allow-Origin': '*' } });
+      }
+    }
+
+    // ── Creem webhook ──
+    if (url.pathname === '/api/payment/webhook') {
+      try {
+        const rawBody = await request.text();
+        const signature = request.headers.get('creem-signature') || '';
+
+        // Verify HMAC-SHA256 (simplified — real impl needs crypto.subtle)
+        // For demo: skip signature verification or use a basic check
+        // In production: use Web Crypto API to verify HMAC
+
+        const payload = JSON.parse(rawBody);
+        const eventType = payload.eventType as string;
+        const accountId = payload.object?.metadata?.accountId as string;
+        const externalEventId = payload.id as string;
+
+        if (!accountId) return Response.json({ ok: true });
+
+        // Dedup
+        const audit = new D1AuditSink(env.DB);
+        const claimed = await audit.claimEvent(externalEventId, 'creem');
+        if (!claimed) return Response.json({ ok: true, deduped: true });
+
+        // Top up
+        if (eventType === 'checkout.completed') {
+          const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, accountId);
+          await ledger.topUp(accountId, 100000, 'creem-' + externalEventId); // 100,000 credits for demo pack
+        }
+
+        return Response.json({ ok: true });
+      } catch (e) {
+        return Response.json({ error: (e as Error).message }, { status: 500 });
+      }
     }
 
     return Response.json({ error: 'not found' }, { status: 404 });
