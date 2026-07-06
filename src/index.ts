@@ -198,14 +198,14 @@ const SUPABASE_URL = 'https://cdfcboqhirhadzykeeey.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_L3tlauTO-QrKwseMijNGlQ_XiJAbSLR';
 const API_BASE = '';
 
-let supabase, session, currentTab = 'llm', imageBase64 = null, audioBase64 = null;
+let sb, session, currentTab = 'llm', imageBase64 = null, audioBase64 = null;
 
 function initSupabase() {
-  supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  supabase.auth.onAuthStateChange((event, sess) => {
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  sb.auth.onAuthStateChange((event, sess) => {
     if (sess) { session = sess; showApp(); } else { showLogin(); }
   });
-  supabase.auth.getSession().then(({ data }) => {
+  sb.auth.getSession().then(({ data }) => {
     if (data.session) { session = data.session; showApp(); }
   });
 }
@@ -213,15 +213,15 @@ function initSupabase() {
 async function login() {
   const email = document.getElementById('email').value;
   const password = document.getElementById('password').value;
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const { error } = await sb.auth.signInWithPassword({ email, password });
   if (error && error.message.includes('Invalid')) {
-    const { error: signUpErr } = await supabase.auth.signUp({ email, password });
+    const { error: signUpErr } = await sb.auth.signUp({ email, password });
     if (signUpErr) { alert(signUpErr.message); return; }
     alert('Account created! Check your email to confirm, then login.');
   } else if (error) { alert(error.message); }
 }
 
-async function logout() { await supabase.auth.signOut(); }
+async function logout() { await sb.auth.signOut(); }
 
 function showApp() {
   document.getElementById('login-screen').style.display = 'none';
