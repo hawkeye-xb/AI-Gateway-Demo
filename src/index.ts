@@ -161,7 +161,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
       <div class="balance-label">Credits Balance</div>
       <div class="balance-value" id="balance">--</div>
     </div>
-    <div style="display:flex;gap:8px">
     <div style="display:flex;gap:8px;align-items:center">
       <select id="credit-pack" style="padding:6px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;font-size:12px">
         <option value="1">$1 = 100K credits</option>
