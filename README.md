@@ -1,14 +1,45 @@
 # ⚡ AI Gateway Demo
 
-A credit-metered, multi-modal **AI gateway** running entirely on Cloudflare Workers.
-It sits in front of several AI providers, meters usage, applies markup, and bills a
-prepaid **credit** balance per user — the core of what a commercial "AI API platform"
-does, in one small, readable, hexagonal-architecture codebase.
+**English** · [简体中文](./README.zh-CN.md)
 
-> **Live demo:** https://ai-gateway-demo.lizhaowen0722.workers.dev
+A credit-metered, multi-modal **AI gateway** running entirely on Cloudflare Workers.
+It sits in front of several AI providers, meters usage, applies a markup, enforces
+per-user rate limits, and bills a prepaid **credit** balance per user — the core of what
+a commercial "AI API platform" does, in one small, readable, hexagonal-architecture
+codebase.
+
+> **Live demo:** https://ai-gateway-demo.hawkeye-xb.com
 >
 > This is a reference/learning project, not a production service. See
 > [Security & production notes](#security--production-notes).
+
+---
+
+## Why this exists (purpose)
+
+Commercial AI API platforms (think OpenRouter-style proxies, or any product that resells
+LLM calls with credits and billing) all solve the same handful of hard problems:
+authenticate users, meter token/second usage, mark it up, charge a prepaid balance
+atomically, take payments, and stop abuse. Those problems are usually buried inside a
+large SaaS backend running on servers.
+
+**This project shows you can build that whole core on a serverless free tier — no server,
+zero fixed cost — and keeps the code small enough to read in an afternoon.** Its goals:
+
+1. **A working reference** for the **reserve → settle** credit-ledger pattern — the right
+   way to bill both instant calls and long-lived streaming sessions without over- or
+   under-charging.
+2. **Prove the "zero fixed cost" architecture** — Cloudflare Workers + D1 + Durable
+   Objects + Supabase Auth, all on free tiers. You pay only the upstream model providers.
+3. **A clean, SOLID / hexagonal example** — the use case depends only on domain
+   interfaces; every external system (auth, providers, ledger, price book, payments) is a
+   swappable adapter.
+4. **Document the traps** — JWT verification, webhook HMAC, float rounding in pricing,
+   Durable Object persistence, per-user rate limiting. Each was a real bug; each is solved
+   and explained.
+
+It is **not** a turnkey production service — it's a teaching implementation you fork,
+understand, and adapt.
 
 ---
 
@@ -21,40 +52,71 @@ does, in one small, readable, hexagonal-architecture codebase.
 | 📁 **ASR (offline)** | Bailian — `qwen3-asr-flash` (sync) | audio seconds |
 | 🔴 **ASR (realtime)** | Bailian — `paraformer-realtime-v2` (WebSocket) | audio seconds |
 
-Every call flows through one pipeline: **authenticate → reserve → invoke provider →
-meter usage → settle → audit**.
+Every call flows through one pipeline: **authenticate → rate-limit → reserve → invoke
+provider → meter usage → settle → audit**.
 
 ### Highlights
 
-- **Prepaid credit ledger** on a per-user Durable Object with a real
-  **reserve → settle** lifecycle (hold funds up front, charge the exact metered cost
-  after). New accounts are seeded with demo credits.
-- **Realtime streaming ASR** over WebSocket: the browser streams mic PCM to the
-  Worker, which relays to the provider and streams transcripts back live. Credits are
+- **Prepaid credit ledger** on a per-user Durable Object with a real **reserve → settle**
+  lifecycle (hold funds up front, charge the exact metered cost after). New accounts are
+  seeded with demo credits.
+- **Realtime streaming ASR** over WebSocket: the browser streams mic PCM to the Worker,
+  which relays to the provider and streams transcripts back live. Credits are
   **pre-authorized on connect** and **settled by actual streamed duration on stop**.
-- **Transparent pricing** — a D1 `price_book` stores each provider's raw cost; the
-  gateway applies a markup (100× in this demo, to make credit movement visible) and
-  converts to integer credits.
-- **Payments** via [Creem](https://creem.io): checkout + signature-verified webhook
-  that tops up the ledger idempotently.
+- **Per-user rate limiting & abuse control** — enforced at the ledger chokepoint (see
+  [below](#rate-limiting--abuse-control)).
+- **Transparent pricing** — a D1 `price_book` stores each provider's raw cost; the gateway
+  applies a markup (100× in this demo, to make credit movement visible) and converts to
+  integer credits.
+- **Payments** via [Creem](https://creem.io): checkout + signature-verified webhook that
+  tops up the ledger idempotently.
 - **Usage audit** — every spend and top-up is recorded in D1 and shown in the UI.
+- **Social + email auth** — Supabase email/password and Google OAuth.
 
 ---
 
 ## Credits & billing model
 
 - **1 credit = $0.0001 USD**, so **1,000,000 credits = $1**. Credits are stored as integers.
-- Charged price = `raw_provider_cost × markup_multiplier`, converted to credits and
-  rounded up. This demo uses a **100× markup** purely so balance changes are easy to
-  see; change `markup_multiplier` in the `price_book` for realistic pricing.
+- Charged price = `raw_provider_cost × markup_multiplier`, converted to credits and rounded
+  up. This demo uses a **100× markup** purely so balance changes are easy to see; change
+  `markup_multiplier` in the `price_book` for realistic pricing.
 - Formula (see `src/infra/rateplan/TokenBasedRatePlan.ts`):
 
   ```
   credits = ceil( usage × raw_cost_per_unit × markup / 0.0001 )
   ```
 
-Everything metered is authoritative at **settle** time; the pre-call **reserve** is
-only an affordability gate (an upper-ish estimate), never the final charge.
+Everything metered is authoritative at **settle** time; the pre-call **reserve** is only an
+affordability gate (an upper-ish estimate), never the final charge.
+
+---
+
+## Rate limiting & abuse control
+
+Because the demo runs Creem in **test mode**, top-ups are effectively free — so the credit
+balance alone can't cap abuse. Limiting is therefore a **first-class gateway feature**,
+enforced at the `reserve()` chokepoint in the per-user Durable Object (every billable call
+funnels through it):
+
+| Layer | Limit | Default | Guards against |
+|-------|-------|---------|----------------|
+| **Rate — burst** | requests / minute / user | `20` | scripted floods |
+| **Rate — daily** | requests / day / user (resets UTC midnight) | `500` | slow-drip grinding |
+| **Balance cap** | max balance / user | `$100` (100M credits) | unlimited free test-mode top-ups |
+
+- Exceeding a rate limit returns **HTTP 429** with a `Retry-After` header.
+- Insufficient balance returns **HTTP 402**.
+- Blocked requests **do not** consume quota (the counter increments only after the gate
+  passes); retries of the same request id are idempotent and never burn a slot.
+- Current usage is exposed read-only via `GET /api/credit/balance` and shown on the
+  dashboard (`today N / 500 · 20/min · cap $100`).
+- Defaults are constants in `src/infra/ledger/DurableObjectLedger.ts`
+  (`MAX_REQ_PER_MIN`, `MAX_REQ_PER_DAY`, `MAX_BALANCE_CREDITS`).
+
+> A **global** (tenant-wide) daily kill-switch — to stop large-scale multi-account farming
+> that per-user limits can't catch — is intentionally left out of the demo. Add a singleton
+> Durable Object counter for production.
 
 ---
 
@@ -72,7 +134,7 @@ src/
   infra/          # adapters (implementations):
     auth/         #   SupabaseJwtAuthProvider  (JWKS verification via jose)
     provider/     #   DeepSeekClient, BailianClient  (LLM / vision / ASR)
-    ledger/       #   CreditLedger (Durable Object) + CreditLedgerStub
+    ledger/       #   CreditLedger (Durable Object) + CreditLedgerStub  (+ rate limiting)
     pricebook/    #   D1PriceBook
     rateplan/     #   TokenBasedRatePlan / DurationBasedRatePlan
     audit/        #   D1AuditSink
@@ -80,13 +142,13 @@ src/
     transport/    #   HttpTransportAdapter
   realtime/
     AsrRelay.ts   # WebSocket relay: browser ⇄ Worker ⇄ provider, reserve/settle
-  index.ts        # Worker entry: routing, auth, payments, config injection, and
-                  #   the served single-page dashboard (HTML)
+  ui.ts           # served single-page dashboard (HTML/CSS/JS)
+  index.ts        # Worker entry: routing, auth, payments, config injection
 migrations/       # D1 schema + seed price_book
 ```
 
-**Stack:** Cloudflare Workers · D1 (SQLite) · Durable Objects · Supabase Auth
-(JWT/JWKS) · DeepSeek · Alibaba Bailian/DashScope · Creem · TypeScript.
+**Stack:** Cloudflare Workers · D1 (SQLite) · Durable Objects · Supabase Auth (JWT/JWKS) ·
+DeepSeek · Alibaba Bailian/DashScope · Creem · TypeScript.
 
 ### HTTP surface
 
@@ -95,7 +157,7 @@ migrations/       # D1 schema + seed price_book
 | `GET /` | — | Dashboard (Supabase config injected from env) |
 | `POST /api/ai/run` | JWT | Chat / Vision / offline ASR |
 | `GET /api/asr/stream` (WS) | JWT (`?token=`) | Realtime ASR |
-| `GET /api/credit/balance` | JWT | Current balance |
+| `GET /api/credit/balance` | JWT | Balance + rate-limit snapshot |
 | `GET /api/audit/log` | JWT | Recent spend + top-ups |
 | `POST /api/payment/checkout` | JWT | Create a Creem checkout |
 | `POST /api/payment/webhook` | HMAC | Creem webhook → top up |
@@ -107,7 +169,7 @@ migrations/       # D1 schema + seed price_book
 ### Prerequisites
 
 - Node ≥ 18, a Cloudflare account (`npx wrangler login`)
-- A [Supabase](https://supabase.com) project (email/password auth)
+- A [Supabase](https://supabase.com) project (email/password auth; optionally Google OAuth)
 - API keys: [DeepSeek](https://platform.deepseek.com),
   [Alibaba Bailian/DashScope](https://bailian.console.aliyun.com)
 - (Optional, for payments) a [Creem](https://creem.io) account + product
@@ -128,8 +190,8 @@ npx wrangler d1 migrations apply ai-gateway-demo-db --remote
 
 ### 3. Configure public vars (`wrangler.toml [vars]`)
 
-Replace **all** of these with your own project's values — otherwise the app
-authenticates against, and creates users in, the demo's Supabase project:
+Replace **all** of these with your own project's values — otherwise the app authenticates
+against, and creates users in, the demo's Supabase project:
 
 ```toml
 SUPABASE_JWKS_URL    = "https://YOUR-PROJECT.supabase.co/auth/v1/.well-known/jwks.json"
@@ -143,13 +205,20 @@ CREEM_PRODUCT_ID     = "prod_xxx"
 ```bash
 npx wrangler secret put DEEPSEEK_API_KEY
 npx wrangler secret put BAILIAN_API_KEY
-npx wrangler secret put CREEM_API_KEY
-npx wrangler secret put CREEM_WEBHOOK_SECRET
+npx wrangler secret put CREEM_API_KEY          # optional (payments)
+npx wrangler secret put CREEM_WEBHOOK_SECRET   # optional (payments)
 ```
 
 For local dev, copy `.dev.vars.example` → `.dev.vars` and fill it in.
 
-### 5. Run / deploy
+### 5. Auth redirect URLs (Supabase)
+
+In **Supabase → Authentication → URL Configuration**, set **Site URL** to your deployed
+domain and add `https://<your-domain>/**` to **Redirect URLs** (and `http://localhost:8787/**`
+for local dev). For Google OAuth, also configure the Google Cloud OAuth client — the
+authorized redirect URI is always `https://<project-ref>.supabase.co/auth/v1/callback`.
+
+### 6. Run / deploy
 
 ```bash
 npm run dev      # local (wrangler dev)
@@ -162,15 +231,19 @@ Point your Creem webhook at `https://<your-worker>/api/payment/webhook`.
 
 ## Security & production notes
 
-This repo is a **learning reference**. It does verify Supabase JWT signatures on every
-authenticated route and the Creem webhook HMAC signature, but before running anything
-resembling production you should also consider:
+This repo is a **learning reference**. It already does the essentials:
 
-- **Rate limiting / abuse protection** on the AI routes (none here).
-- **Reservation durability** — realtime holds are persisted, but review the TTL/prune
-  logic (`CreditLedger`) for your workload.
+- ✅ Verifies the Supabase JWT signature (JWKS/ES256) on **every** authenticated route.
+- ✅ Verifies the Creem webhook **HMAC** signature (fail-closed) before crediting.
+- ✅ Persists the credit balance, reservations, and top-up idempotency keys durably.
+- ✅ Per-user rate limiting + balance cap.
+
+Before running anything resembling production, also consider:
+
+- **Global / tenant-wide limits** — per-user limits don't stop mass multi-account farming.
 - **Markup / pricing** — the 100× markup is a demo aid; set real prices in `price_book`.
 - **CORS** is wide open (`*`) for demo convenience; restrict it.
+- **Reservation TTL/prune** logic (`CreditLedger`) — review for your workload.
 - Rotate any key that has ever been shared.
 
 No secrets are committed to this repo (`.dev.vars` is gitignored; secrets live in
