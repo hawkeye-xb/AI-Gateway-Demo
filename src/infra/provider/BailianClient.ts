@@ -2,8 +2,6 @@ import type {
   IAiProviderClient,
   ProviderRequest,
   ProviderResponse,
-  FileRef,
-  ProviderFileInput,
 } from '../../domain/IAiProviderClient';
 import {
   ClientInputError,
@@ -151,15 +149,5 @@ export class BailianClient implements IAiProviderClient {
 
     const usage: RawUsage = { kind: 'audio_seconds', amount: seconds, meta: usageData };
     return { raw: { output, text }, usage };
-  }
-
-  async prepareFileInput(fileRef: FileRef): Promise<ProviderFileInput> {
-    // For demo: use inline base64 for small files, URL for larger ones
-    if (fileRef.sizeBytes < 5 * 1024 * 1024 && fileRef.mimeType.startsWith('image/')) {
-      // For demo simplicity, assume the caller passes base64 in the payload directly
-      // Real implementation would read from R2
-      return { kind: 'inline_base64', value: '' };
-    }
-    return { kind: 'url', value: '' };
   }
 }

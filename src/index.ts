@@ -21,20 +21,55 @@ interface Env {
   BAILIAN_API_KEY: string;
   SUPABASE_JWKS_URL: string;
   SUPABASE_PROJECT_URL: string;
+  SUPABASE_ANON_KEY: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
   CREEM_API_KEY: string;
   CREEM_WEBHOOK_SECRET: string;
+  CREEM_PRODUCT_ID: string;
 }
 
-// ── JWT helper: extract user ID without full verification ──
-function extractUserId(request: Request): string | null {
-  const auth = request.headers.get('Authorization') || '';
-  const token = auth.replace('Bearer ', '');
+// ── Verified auth ──
+// A single module-scoped JWKS verifier. jose caches keys per instance, so we must
+// NOT recreate it per request (that refetches the JWKS every time and risks rate
+// limiting). Every authenticated route verifies the Supabase JWT signature — a
+// decoded-but-unverified `sub` is NOT trusted, otherwise anyone could forge a token
+// to read another user's data or bill AI calls to someone else's account.
+let _authProvider: SupabaseJwtAuthProvider | undefined;
+function getAuth(env: Env): SupabaseJwtAuthProvider {
+  if (!_authProvider) _authProvider = new SupabaseJwtAuthProvider(env.SUPABASE_JWKS_URL);
+  return _authProvider;
+}
+
+function bearer(request: Request): string {
+  return (request.headers.get('Authorization') || '').replace('Bearer ', '');
+}
+
+// Verify a Supabase JWT (signature + sub) and return the authenticated userId, or null.
+async function verifyUserId(token: string, env: Env): Promise<string | null> {
   if (!token) return null;
   try {
-    const payload = JSON.parse(atob(token.split('.')[1]));
-    return payload.sub || null;
-  } catch { return null; }
+    return (await getAuth(env).verify(token)).userId;
+  } catch {
+    return null;
+  }
+}
+
+// Verify Creem's webhook signature: an HMAC-SHA256 hex digest of the raw request
+// body, keyed by the webhook secret, delivered in the `creem-signature` header.
+// Without this, anyone who knows the URL could POST a fake checkout.completed and
+// credit any account for free.
+async function verifyCreemSignature(rawBody: string, signature: string, secret: string): Promise<boolean> {
+  if (!signature || !secret) return false;
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(rawBody));
+  const expected = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  // Constant-time compare to avoid timing side-channels.
+  if (expected.length !== signature.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
+  return diff === 0;
 }
 
 // ── DI ──
@@ -207,8 +242,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </div>
 
 <script>
-const SUPABASE_URL = 'https://cdfcboqhirhadzykeeey.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_L3tlauTO-QrKwseMijNGlQ_XiJAbSLR';
+const SUPABASE_URL = '__SUPABASE_URL__';
+const SUPABASE_ANON_KEY = '__SUPABASE_ANON_KEY__';
 const API_BASE = '';
 
 let _gw_sb, _gw_session, _gw_tab = 'llm', _gw_img = null, _gw_aud = null, _gw_audUri = null;
@@ -514,25 +549,29 @@ export default {
     }
 
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      return new Response(HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      // Inject public Supabase config from env so the whole app is configured in
+      // one place (wrangler.toml [vars]); no project-specific values are baked into
+      // the client source.
+      const html = HTML
+        .replace('__SUPABASE_URL__', env.SUPABASE_PROJECT_URL)
+        .replace('__SUPABASE_ANON_KEY__', env.SUPABASE_ANON_KEY);
+      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     }
 
     // ── Realtime ASR (WebSocket) ──
-    // Browsers can't set Authorization headers on a WebSocket, so the Supabase
-    // JWT is passed as ?token=. userId is decoded (not fully verified) here — same
-    // posture as /api/credit/balance. The relay reserves a hold on connect and
-    // settles the real streamed duration on close.
+    // Browsers can't set Authorization headers on a WebSocket, so the Supabase JWT
+    // is passed as ?token=. It is signature-verified here (not merely decoded) — a
+    // realtime session bills a real account, so an unverified sub could drain
+    // someone else's credits.
     if (url.pathname === '/api/asr/stream') {
-      const token = url.searchParams.get('token') || '';
-      let userId: string | null = null;
-      try { userId = JSON.parse(atob(token.split('.')[1])).sub || null; } catch { userId = null; }
+      const userId = await verifyUserId(url.searchParams.get('token') || '', env);
       if (!userId) return new Response('unauthorized', { status: 401 });
       return handleAsrStream(request, env, userId);
     }
 
     // ── AI call ──
     if (url.pathname === '/api/ai/run') {
-      const userId = extractUserId(request);
+      const userId = await verifyUserId(bearer(request), env);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       const useCase = buildUseCase(env, userId);
       try {
@@ -544,7 +583,7 @@ export default {
 
     // ── Balance ──
     if (url.pathname === '/api/credit/balance') {
-      const userId = extractUserId(request);
+      const userId = await verifyUserId(bearer(request), env);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, userId);
       const balance = await ledger.getBalance(userId);
@@ -553,7 +592,7 @@ export default {
 
     // ── Audit log ──
     if (url.pathname === '/api/audit/log') {
-      const userId = extractUserId(request);
+      const userId = await verifyUserId(bearer(request), env);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       const limit = parseInt(url.searchParams.get('limit') || '20');
       // Unified timeline: spend (audit_log) + top-ups (topups), newest first.
@@ -573,7 +612,7 @@ export default {
 
     // ── Creem checkout ──
     if (url.pathname === '/api/payment/checkout') {
-      const userId = extractUserId(request);
+      const userId = await verifyUserId(bearer(request), env);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       try {
         let creditsMult = 1;
@@ -584,7 +623,7 @@ export default {
           method: 'POST',
           headers: { 'x-api-key': env.CREEM_API_KEY, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            product_id: 'prod_vfOhDIXGlk1Dfkd8MT6AB',
+            product_id: env.CREEM_PRODUCT_ID,
             units: creditsMult,
             custom_price: 100,  // $1.00 per unit in cents — overrides product price
             success_url: url.origin + '/',
@@ -605,9 +644,10 @@ export default {
         const rawBody = await request.text();
         const signature = request.headers.get('creem-signature') || '';
 
-        // Verify HMAC-SHA256 (simplified — real impl needs crypto.subtle)
-        // For demo: skip signature verification or use a basic check
-        // In production: use Web Crypto API to verify HMAC
+        // Fail-closed signature check. Reject anything without a valid HMAC so a
+        // forged checkout.completed can't mint free credits.
+        const valid = await verifyCreemSignature(rawBody, signature, env.CREEM_WEBHOOK_SECRET);
+        if (!valid) return Response.json({ error: 'invalid signature' }, { status: 401 });
 
         const payload = JSON.parse(rawBody);
         const eventType = payload.eventType as string;

@@ -85,7 +85,40 @@ export class AiCallUseCase {
     }
   }
 
-  private estimate(_req: NormalizedRequest): number {
-    return 100; // reasonable buffer for LLM calls
+  // Pre-authorization hold placed BEFORE the provider call, when the real cost is
+  // not yet known. It only needs to be a reasonable upper-ish bound: big enough that
+  // a near-empty account can't run an expensive call, small enough not to lock up the
+  // balance. settle() later trues this up to the exact metered cost. Constants mirror
+  // the demo price_book (raw USD/unit × 100 markup ÷ $0.0001/credit); they don't have
+  // to be exact because they never bill — they only gate affordability.
+  private estimate(req: NormalizedRequest): number {
+    switch (req.modality) {
+      case 'asr': {
+        // Hold from audio payload size using a conservative (over-estimating) byte
+        // rate so the hold covers the true duration regardless of codec.
+        const audio = (req.payload as { audio?: string })?.audio ?? '';
+        const b64 = audio.includes(',') ? audio.slice(audio.indexOf(',') + 1) : audio;
+        const bytes = Math.floor((b64.length * 3) / 4);
+        const estSeconds = Math.min(3600, Math.max(1, Math.ceil(bytes / 4000))); // ~32 kbps floor, cap 1h
+        return estSeconds * 5; // ≈ 5 credits/sec at current pricing
+      }
+      case 'vision': {
+        // Image-token count is unknown pre-call; reserve a generous flat buffer.
+        return 5000;
+      }
+      case 'llm':
+      default: {
+        const payload = (req.payload ?? {}) as { messages?: Array<{ content?: unknown }>; max_tokens?: number };
+        let chars = 0;
+        for (const m of payload.messages ?? []) {
+          if (typeof m.content === 'string') chars += m.content.length;
+        }
+        const inputTokens = Math.ceil(chars / 4); // ~4 chars/token
+        const outputTokens = payload.max_tokens ?? 512;
+        // deepseek-chat demo pricing: input $0.00000027/tok, output $0.0000011/tok.
+        const credits = Math.ceil((inputTokens * 0.00000027 + outputTokens * 0.0000011) * 100 / 0.0001);
+        return Math.max(50, credits);
+      }
+    }
   }
 }
