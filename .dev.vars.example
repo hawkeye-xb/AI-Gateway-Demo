@@ -14,9 +14,6 @@ DEEPSEEK_API_KEY=sk-your-deepseek-key
 # paraformer-realtime-v2) — https://bailian.console.aliyun.com
 BAILIAN_API_KEY=sk-your-dashscope-key
 
-# Supabase service role key (server-side admin key) — Project Settings > API
-SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
-
 # Creem payments (test mode keys are prefixed creem_test_) — https://creem.io
 CREEM_API_KEY=creem_test_your-key
 CREEM_WEBHOOK_SECRET=whsec_your-webhook-signing-secret

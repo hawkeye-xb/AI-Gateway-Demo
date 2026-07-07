@@ -143,7 +143,6 @@ CREEM_PRODUCT_ID     = "prod_xxx"
 ```bash
 npx wrangler secret put DEEPSEEK_API_KEY
 npx wrangler secret put BAILIAN_API_KEY
-npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler secret put CREEM_API_KEY
 npx wrangler secret put CREEM_WEBHOOK_SECRET
 ```

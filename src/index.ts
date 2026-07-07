@@ -22,7 +22,6 @@ interface Env {
   SUPABASE_JWKS_URL: string;
   SUPABASE_PROJECT_URL: string;
   SUPABASE_ANON_KEY: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
   CREEM_API_KEY: string;
   CREEM_WEBHOOK_SECRET: string;
   CREEM_PRODUCT_ID: string;
