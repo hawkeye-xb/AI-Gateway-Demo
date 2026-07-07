@@ -164,9 +164,10 @@ migrations/       # D1 表结构 + price_book 种子数据
 npm install
 ```
 
-### 2. 创建 D1 数据库
+### 2. 创建你的配置 + D1 数据库
 
 ```bash
+cp wrangler.toml.example wrangler.toml            # 已 gitignore——存你自己的真实 id
 npx wrangler d1 create ai-gateway-demo-db
 # 把打印出来的 database_id 填进 wrangler.toml
 npx wrangler d1 migrations apply ai-gateway-demo-db --remote

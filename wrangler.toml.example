@@ -1,0 +1,33 @@
+# Copy this file to `wrangler.toml` and fill in YOUR own values, then deploy.
+#   cp wrangler.toml.example wrangler.toml
+# `wrangler.toml` is gitignored so your real project ids never land in git.
+
+name = "ai-gateway-demo"
+main = "src/index.ts"
+compatibility_date = "2025-07-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ai-gateway-demo-db"
+# Run `npx wrangler d1 create ai-gateway-demo-db` and paste the printed id here.
+database_id = "YOUR_D1_DATABASE_ID"
+
+[[durable_objects.bindings]]
+name = "CREDIT_LEDGER"
+class_name = "CreditLedger"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CreditLedger"]
+
+# ── Public config (safe to commit in YOUR fork) ──────────────────────────────
+# These are NOT secrets — the Supabase URL + anon (publishable) key are shipped
+# to every browser by design. But you MUST replace them with your own project's
+# values, or your app will authenticate against, and create users in, someone
+# else's Supabase project. Secrets (API keys) are set separately via
+# `wrangler secret put` — see .dev.vars.example.
+[vars]
+SUPABASE_JWKS_URL = "https://YOUR-PROJECT.supabase.co/auth/v1/.well-known/jwks.json"
+SUPABASE_PROJECT_URL = "https://YOUR-PROJECT.supabase.co"
+SUPABASE_ANON_KEY = "sb_publishable_YOUR_ANON_KEY"
+CREEM_PRODUCT_ID = "prod_YOUR_PRODUCT_ID"

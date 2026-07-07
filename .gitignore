@@ -6,3 +6,6 @@ dist/
 .env.*
 *.log
 .DS_Store
+
+# Real deploy config (contains your project ids) — use wrangler.toml.example as template
+wrangler.toml

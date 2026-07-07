@@ -180,11 +180,12 @@ DeepSeek · Alibaba Bailian/DashScope · Creem · TypeScript.
 npm install
 ```
 
-### 2. Create the D1 database
+### 2. Create your config + D1 database
 
 ```bash
+cp wrangler.toml.example wrangler.toml            # gitignored — holds your real ids
 npx wrangler d1 create ai-gateway-demo-db
-# put the printed database_id into wrangler.toml
+# paste the printed database_id into wrangler.toml
 npx wrangler d1 migrations apply ai-gateway-demo-db --remote
 ```
 
