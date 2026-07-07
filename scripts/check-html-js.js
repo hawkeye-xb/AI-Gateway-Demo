@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.ts'), 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui.ts'), 'utf8');
 const match = src.match(/const HTML = `([\s\S]*?)`;/);
 if (!match) { console.error('ERROR: Could not find HTML template literal'); process.exit(1); }
 
