@@ -139,7 +139,22 @@ export default {
       try {
         return (await useCase.handle(new HttpTransportAdapter(), request)) as Response;
       } catch (e) {
-        return Response.json({ error: (e as Error).message }, { status: 500, headers: { 'Access-Control-Allow-Origin': '*' } });
+        const msg = (e as Error).message;
+        // Map billing/throttle failures to precise HTTP semantics: 429 for rate
+        // limits, 402 for insufficient balance, 500 for everything else.
+        const status = msg.startsWith('rate limit') ? 429
+          : msg.startsWith('insufficient balance') ? 402
+          : 500;
+        const headers: Record<string, string> = { 'Access-Control-Allow-Origin': '*' };
+        if (status === 429) {
+          // Standard throttle signal so clients can back off: per-minute window
+          // resets at the next minute boundary, the daily quota at UTC midnight.
+          const now = Date.now();
+          headers['Retry-After'] = String(msg.includes('/minute')
+            ? Math.ceil((60_000 - (now % 60_000)) / 1000)
+            : Math.ceil((86_400_000 - (now % 86_400_000)) / 1000));
+        }
+        return Response.json({ error: msg }, { status, headers });
       }
     }
 
@@ -148,8 +163,8 @@ export default {
       const userId = await verifyUserId(bearer(request), env);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, userId);
-      const balance = await ledger.getBalance(userId);
-      return Response.json({ balance }, { headers: { 'Access-Control-Allow-Origin': '*' } });
+      const snap = await ledger.snapshot(userId);
+      return Response.json(snap, { headers: { 'Access-Control-Allow-Origin': '*' } });
     }
 
     // ── Audit log ──

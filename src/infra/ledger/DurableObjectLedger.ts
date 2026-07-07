@@ -24,6 +24,42 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
   // forever. Ignore + prune any older than this when reserving.
   private static readonly RESERVATION_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+  // ── Per-user rate limiting ───────────────────────────────────
+  // In test mode Creem top-ups are effectively free, so credit balance ALONE can
+  // never cap abuse: a farmer can mint unlimited credits (or unlimited accounts,
+  // each seeded with DEMO_INITIAL_CREDITS). Every billable call — chat, vision,
+  // offline ASR, one hold per realtime ASR session — funnels through reserve(),
+  // so throttling here bounds REAL upstream $ spend per user regardless of how
+  // many free credits they farm. Two windows: a per-minute burst guard (blocks
+  // scripted floods) and a per-day ceiling (blocks slow-drip grinding).
+  private static readonly MAX_REQ_PER_MIN = 20;
+  private static readonly MAX_REQ_PER_DAY = 500;
+  // Balance ceiling: test-mode Creem lets anyone complete unlimited free "test"
+  // checkouts, each firing a top-up webhook. Clamping the balance makes farming
+  // pointless (you can't mint a billion credits) while staying idempotent-safe —
+  // we clamp the stored balance rather than rejecting, so a webhook is never
+  // errored into an infinite Creem retry loop.
+  private static readonly MAX_BALANCE_CREDITS = 100_000_000; // = $100
+
+  private async enforceRateLimit(): Promise<void> {
+    const now = Date.now();
+    const minuteKey = Math.floor(now / 60_000);   // current epoch-minute
+    const dayKey = Math.floor(now / 86_400_000);  // current epoch-day (UTC)
+    const rl = (await this.ctx.storage.get<{ minKey: number; minCount: number; dayKey: number; dayCount: number }>('ratelimit'))
+      ?? { minKey: minuteKey, minCount: 0, dayKey, dayCount: 0 };
+    if (rl.minKey !== minuteKey) { rl.minKey = minuteKey; rl.minCount = 0; }
+    if (rl.dayKey !== dayKey) { rl.dayKey = dayKey; rl.dayCount = 0; }
+    if (rl.minCount >= CreditLedger.MAX_REQ_PER_MIN) {
+      throw new Error(`rate limit: max ${CreditLedger.MAX_REQ_PER_MIN} requests/minute — slow down`);
+    }
+    if (rl.dayCount >= CreditLedger.MAX_REQ_PER_DAY) {
+      throw new Error(`rate limit: daily quota of ${CreditLedger.MAX_REQ_PER_DAY} requests reached — resets at UTC midnight`);
+    }
+    rl.minCount++;
+    rl.dayCount++;
+    await this.ctx.storage.put('ratelimit', rl);
+  }
+
   // ── Persistence ──────────────────────────────────────────────
   // The previous version kept `balance` in a plain instance field that reset to 0
   // every time the DO was evicted from memory (routine, after seconds/minutes of
@@ -76,6 +112,9 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
         case 'getBalance':
           result = await this.getBalance(args[0] as string);
           break;
+        case 'snapshot':
+          result = await this.snapshot();
+          break;
         case 'topUp':
           await this.topUp(args[0] as string, args[1] as number, args[2] as string);
           break;
@@ -93,6 +132,9 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
     if (this.reservations.has(idempotencyKey)) {
       return idempotencyKey;
     }
+    // Throttle AFTER the idempotency short-circuit so a client retry of the SAME
+    // request never burns a rate-limit slot — only genuinely new calls count.
+    await this.enforceRateLimit();
     // Prune abandoned reservations so a died-mid-session hold can't lock balance forever.
     const now = Date.now();
     let pruned = false;
@@ -136,13 +178,32 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
     return this.balance;
   }
 
+  // Read-only snapshot for the UI: balance plus how much of today's request quota
+  // is used. Never mutates — reading it does NOT consume a rate-limit slot.
+  async snapshot(): Promise<{ balance: number; dayUsed: number; dayLimit: number; minLimit: number; maxBalance: number }> {
+    await this.ensureLoaded();
+    const dayKey = Math.floor(Date.now() / 86_400_000);
+    const rl = await this.ctx.storage.get<{ minKey: number; minCount: number; dayKey: number; dayCount: number }>('ratelimit');
+    const dayUsed = rl && rl.dayKey === dayKey ? rl.dayCount : 0;
+    return {
+      balance: this.balance,
+      dayUsed,
+      dayLimit: CreditLedger.MAX_REQ_PER_DAY,
+      minLimit: CreditLedger.MAX_REQ_PER_MIN,
+      maxBalance: CreditLedger.MAX_BALANCE_CREDITS,
+    };
+  }
+
   async topUp(_accountId: string, amount: number, idempotencyKey: string): Promise<void> {
     await this.ensureLoaded();
     // Idempotency guard is now persisted too, so a webhook retry after a DO eviction
     // can't double-credit.
     const dedupKey = 'topup:' + idempotencyKey;
     if (await this.ctx.storage.get(dedupKey)) return;
-    this.balance += amount;
+    // Clamp at the ceiling so unlimited free test-mode checkouts can't mint an
+    // absurd balance. Idempotency-safe: we always mark the event processed, so
+    // Creem never retries a clamped top-up into a loop.
+    this.balance = Math.min(this.balance + amount, CreditLedger.MAX_BALANCE_CREDITS);
     await this.ctx.storage.put(dedupKey, true);
     await this.persistBalance();
   }

@@ -52,6 +52,8 @@ a:hover { color: var(--accent-hover); }
 .balance-value { font-size: 34px; font-weight: 600; letter-spacing: -1px; color: var(--text); font-family: 'JetBrains Mono', monospace; line-height: 1.1; margin-top: 2px; }
 .balance-value.empty { color: var(--red); }
 .balance-usd { font-size: 12px; color: var(--subtle); margin-top: 4px; }
+.balance-quota { font-size: 12px; color: var(--muted); margin-top: 6px; font-family: 'JetBrains Mono', monospace; }
+.balance-quota.warn { color: var(--amber); }
 .balance-actions { display: flex; gap: 8px; align-items: center; }
 .select { font: inherit; font-size: 12px; padding: 8px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text-2); }
 
@@ -119,6 +121,10 @@ a:hover { color: var(--accent-hover); }
 .login-card input:focus { outline: none; border-color: var(--accent); }
 .login-card .btn-primary { width: 100%; padding: 11px; margin-top: 4px; }
 .login-card .note { color: var(--subtle); font-size: 12px; margin-top: 14px; line-height: 1.5; }
+.btn-google { width: 100%; padding: 11px; display: flex; align-items: center; justify-content: center; gap: 10px; background: #fff; color: #1f1f1f; border: 1px solid var(--border); font-weight: 500; }
+.btn-google:hover { background: #f2f2f2; color: #1f1f1f; }
+.or-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--subtle); font-size: 12px; }
+.or-divider::before, .or-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
 @media (max-width: 560px) {
   .balance-card { flex-direction: column; align-items: flex-start; }
@@ -132,6 +138,8 @@ a:hover { color: var(--accent-hover); }
   <div class="login-card">
     <div class="brand">⚡ AI Gateway</div>
     <div class="sub">Credit-metered multi-modal AI gateway</div>
+    <button class="btn btn-google" onclick="gwGoogleLogin()"><svg width="16" height="16" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>Continue with Google</button>
+    <div class="or-divider"><span>or</span></div>
     <input id="email" type="email" placeholder="Email" />
     <input id="password" type="password" placeholder="Password" />
     <button class="btn btn-primary" onclick="gwLogin()">Login / Sign up</button>
@@ -154,6 +162,7 @@ a:hover { color: var(--accent-hover); }
       <div class="balance-label">Credits Balance</div>
       <div class="balance-value" id="balance">--</div>
       <div class="balance-usd" id="balance-usd">1,000,000 credits = $1</div>
+      <div class="balance-quota" id="balance-quota"></div>
     </div>
     <div class="balance-actions">
       <select id="credit-pack" class="select">
@@ -271,6 +280,14 @@ async function gwLogin() {
 
 async function gwLogout() { await _gw_sb.auth.signOut(); }
 
+async function gwGoogleLogin() {
+  const {error} = await _gw_sb.auth.signInWithOAuth({
+    provider: 'google',
+    options: { redirectTo: window.location.origin }
+  });
+  if (error != null) alert(error.message);
+}
+
 function gwShowApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app-screen').style.display = 'block';
@@ -304,6 +321,12 @@ async function gwRefreshBalance() {
     el.className = 'balance-value' + (bal < 100 ? ' empty' : '');
     const usd = document.getElementById('balance-usd');
     if (usd) usd.textContent = '≈ $' + (bal * 0.0001).toFixed(2) + '  ·  1,000,000 credits = $1';
+    const q = document.getElementById('balance-quota');
+    if (q && d.dayLimit) {
+      const used = d.dayUsed ?? 0, lim = d.dayLimit, rem = Math.max(0, lim - used);
+      q.textContent = '今日调用 ' + used + ' / ' + lim + ' · 限速 ' + d.minLimit + '/分 · 余额上限 $' + Math.round(d.maxBalance * 0.0001);
+      q.className = 'balance-quota' + (rem <= lim * 0.1 ? ' warn' : '');
+    }
   } catch(_e) {}
 }
 

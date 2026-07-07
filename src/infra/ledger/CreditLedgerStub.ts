@@ -22,7 +22,14 @@ export class CreditLedgerStub {
       method: 'POST',
       body: JSON.stringify({ method, args }),
     });
-    if (!resp.ok) throw new Error(await resp.text());
+    if (!resp.ok) {
+      // The DO serializes thrown errors as {"error": message}. Unwrap so callers
+      // (and the HTTP layer's 429/402 mapping) see the clean message, not the JSON.
+      const text = await resp.text();
+      let msg = text;
+      try { const j = JSON.parse(text) as { error?: string }; if (j && j.error) msg = j.error; } catch { /* not JSON */ }
+      throw new Error(msg);
+    }
     return resp.json();
   }
 
@@ -37,6 +44,11 @@ export class CreditLedgerStub {
   }
   async getBalance(accountId: string): Promise<number> {
     return (await this.call('getBalance', accountId)) as number;
+  }
+  // Read-only view of balance + current rate-limit window usage, for the UI to
+  // surface "N / limit today" without burning a request slot.
+  async snapshot(accountId: string): Promise<{ balance: number; dayUsed: number; dayLimit: number; minLimit: number; maxBalance: number }> {
+    return (await this.call('snapshot', accountId)) as { balance: number; dayUsed: number; dayLimit: number; minLimit: number; maxBalance: number };
   }
   async topUp(accountId: string, amount: number, idempotencyKey: string): Promise<void> {
     await this.call('topUp', accountId, amount, idempotencyKey);
