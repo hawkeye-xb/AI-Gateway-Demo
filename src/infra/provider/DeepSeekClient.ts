@@ -44,13 +44,21 @@ export class DeepSeekClient implements IAiProviderClient {
     if (finishReason === 'length' && usageData) {
       throw new PartialFailureError(
         'response truncated by max_tokens',
-        { kind: 'tokens', amount: (usageData.prompt_tokens || 0) + (usageData.completion_tokens || 0), meta: usageData },
+        {
+          kind: 'tokens',
+          amount: (usageData.prompt_tokens || 0) + (usageData.completion_tokens || 0),
+          inputTokens: usageData.prompt_tokens || 0,
+          outputTokens: usageData.completion_tokens || 0,
+          meta: usageData,
+        },
       );
     }
 
     const usage: RawUsage = {
       kind: 'tokens',
       amount: usageData ? (usageData.prompt_tokens || 0) + (usageData.completion_tokens || 0) : 0,
+      inputTokens: usageData?.prompt_tokens || 0,
+      outputTokens: usageData?.completion_tokens || 0,
       meta: usageData,
     };
 

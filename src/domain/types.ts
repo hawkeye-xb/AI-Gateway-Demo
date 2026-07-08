@@ -4,7 +4,9 @@ export type Modality = 'llm' | 'vision' | 'asr' | 'tts';
 
 export interface RawUsage {
   kind: 'tokens' | 'audio_seconds' | 'images';
-  amount: number;
+  amount: number;          // total billable units (kept for audit + single-rate paths)
+  inputTokens?: number;    // tokens kind: prompt/input tokens (billed at input rate)
+  outputTokens?: number;   // tokens kind: completion/output tokens (billed at output rate)
   meta?: unknown;
 }
 

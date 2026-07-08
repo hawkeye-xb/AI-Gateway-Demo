@@ -166,10 +166,10 @@ a:hover { color: var(--accent-hover); }
     </div>
     <div class="balance-actions">
       <select id="credit-pack" class="select">
-        <option value="1">1M credits — $1</option>
-        <option value="5">5M credits — $5</option>
-        <option value="10">10M credits — $10</option>
-        <option value="50">50M credits — $50</option>
+        <option value="starter">1M credits — $1</option>
+        <option value="plus">5M credits — $5</option>
+        <option value="pro">10M credits — $10</option>
+        <option value="max">50M credits — $50</option>
       </select>
       <button onclick="gwBuyCredits()" class="btn btn-primary">Buy</button>
       <button onclick="gwRefreshBalance()" class="btn">Refresh</button>
@@ -551,8 +551,8 @@ function gwAsrCleanup() {
 
 async function gwBuyCredits() {
   try {
-    const mult = document.getElementById('credit-pack').value;
-    const d = await gwApi('/api/payment/checkout', { credits_mult: parseInt(mult) });
+    const pkg = document.getElementById('credit-pack').value;
+    const d = await gwApi('/api/payment/checkout', { packageId: pkg });
     window.open(d.url, '_blank');
     alert('Complete payment in the new tab, then come back and refresh balance.');
   } catch(e) { alert('Payment error: '+e.message); }

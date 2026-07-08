@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { ICreditLedger } from '../../domain/ICreditLedger';
+import { CONFIG } from '../../config';
 
 interface Reservation {
   amount: number;
@@ -8,7 +9,7 @@ interface Reservation {
 
 // New DO instances (and demo users) start with this balance so the demo works
 // out of the box. Granted exactly once per user, guarded by the 'initialized' flag.
-const DEMO_INITIAL_CREDITS = 1_000_000;
+const DEMO_INITIAL_CREDITS = CONFIG.ledger.initialCredits;
 
 export class CreditLedger extends DurableObject implements ICreditLedger {
   // In-memory cache of the persisted balance. NEVER trust this before ensureLoaded().
@@ -32,14 +33,14 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
   // so throttling here bounds REAL upstream $ spend per user regardless of how
   // many free credits they farm. Two windows: a per-minute burst guard (blocks
   // scripted floods) and a per-day ceiling (blocks slow-drip grinding).
-  private static readonly MAX_REQ_PER_MIN = 20;
-  private static readonly MAX_REQ_PER_DAY = 500;
+  private static readonly MAX_REQ_PER_MIN = CONFIG.ledger.rateLimit.perMinute;
+  private static readonly MAX_REQ_PER_DAY = CONFIG.ledger.rateLimit.perDay;
   // Balance ceiling: test-mode Creem lets anyone complete unlimited free "test"
   // checkouts, each firing a top-up webhook. Clamping the balance makes farming
   // pointless (you can't mint a billion credits) while staying idempotent-safe —
   // we clamp the stored balance rather than rejecting, so a webhook is never
   // errored into an infinite Creem retry loop.
-  private static readonly MAX_BALANCE_CREDITS = 100_000_000; // = $100
+  private static readonly MAX_BALANCE_CREDITS = CONFIG.ledger.maxBalanceCredits;
 
   private async enforceRateLimit(): Promise<void> {
     const now = Date.now();

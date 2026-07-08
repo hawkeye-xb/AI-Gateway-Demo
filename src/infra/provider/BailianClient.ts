@@ -50,6 +50,8 @@ export class BailianClient implements IAiProviderClient {
     const usage: RawUsage = {
       kind: 'tokens',
       amount: usageData ? (usageData.input_tokens || 0) + (usageData.output_tokens || 0) : 0,
+      inputTokens: usageData?.input_tokens || 0,
+      outputTokens: usageData?.output_tokens || 0,
       meta: usageData,
     };
     return { raw: { output, usage: usageData }, usage };
@@ -76,6 +78,8 @@ export class BailianClient implements IAiProviderClient {
     const usage: RawUsage = {
       kind: 'tokens',
       amount: usageData ? (usageData.input_tokens || 0) + (usageData.output_tokens || 0) : 0,
+      inputTokens: usageData?.input_tokens || 0,
+      outputTokens: usageData?.output_tokens || 0,
       meta: usageData,
     };
     return { raw: { output, usage: usageData }, usage };

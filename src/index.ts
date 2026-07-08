@@ -5,12 +5,13 @@ import { DeepSeekClient } from './infra/provider/DeepSeekClient';
 import { BailianClient } from './infra/provider/BailianClient';
 import { HttpTransportAdapter } from './infra/transport/HttpTransportAdapter';
 import { D1AuditSink } from './infra/audit/D1AuditSink';
-import { D1PriceBook } from './infra/pricebook/D1PriceBook';
-import { TokenBasedRatePlan } from './infra/rateplan/TokenBasedRatePlan';
+import { ConfigPriceBook } from './infra/pricebook/ConfigPriceBook';
+import { RatePlan } from './infra/rateplan/TokenBasedRatePlan';
 import { TokenUsageExtractor, AudioDurationExtractor } from './infra/usage/TokenUsageExtractor';
 import { CreditLedger } from './infra/ledger/DurableObjectLedger';
 import { CreditLedgerStub } from './infra/ledger/CreditLedgerStub';
 import { handleAsrStream } from './realtime/AsrRelay';
+import { CONFIG } from './config';
 import type { IAiProviderClient } from './domain/IAiProviderClient';
 
 export { CreditLedger };
@@ -85,8 +86,8 @@ function buildUseCase(env: Env, userId: string): AiCallUseCase {
     ['vision', new TokenUsageExtractor()],
     ['asr', new AudioDurationExtractor()],
   ]);
-  const priceBook = new D1PriceBook(env.DB);
-  const ratePlan = new TokenBasedRatePlan();
+  const priceBook = new ConfigPriceBook();
+  const ratePlan = new RatePlan();
   const audit = new D1AuditSink(env.DB);
   return new AiCallUseCase(auth, ledger, providers, usageExtractors, priceBook, ratePlan, audit);
 }
@@ -192,8 +193,13 @@ export default {
       const userId = await verifyUserId(bearer(request), env);
       if (!userId) return Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'Access-Control-Allow-Origin': '*' } });
       try {
-        let creditsMult = 1;
-        try { const body = await request.json() as { credits_mult?: number }; if (body.credits_mult) creditsMult = body.credits_mult; } catch {}
+        // Packages are defined SERVER-SIDE (CONFIG.packages). The client sends only
+        // a package id — never the price or credit amount — so a tampered request
+        // can't buy 50M credits for $1.
+        let packageId = 'starter';
+        try { const body = await request.json() as { packageId?: string }; if (body.packageId) packageId = body.packageId; } catch {}
+        const pkg = CONFIG.packages[packageId];
+        if (!pkg) return Response.json({ error: `unknown package: ${packageId}` }, { status: 400, headers: { 'Access-Control-Allow-Origin': '*' } });
         const isTestKey = env.CREEM_API_KEY.startsWith('creem_test_');
         const baseUrl = isTestKey ? 'https://test-api.creem.io/v1' : 'https://api.creem.io/v1';
         const resp = await fetch(baseUrl + '/checkouts', {
@@ -201,10 +207,10 @@ export default {
           headers: { 'x-api-key': env.CREEM_API_KEY, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             product_id: env.CREEM_PRODUCT_ID,
-            units: creditsMult,
-            custom_price: 100,  // $1.00 per unit in cents — overrides product price
+            units: 1,
+            custom_price: Math.round(pkg.priceUsd * 100), // price in cents — overrides the product's stored price
             success_url: url.origin + '/',
-            metadata: { accountId: userId, requestId: crypto.randomUUID(), credits: String(creditsMult * 1000000) },
+            metadata: { accountId: userId, requestId: crypto.randomUUID(), credits: String(pkg.credits) },
           }),
         });
         if (!resp.ok) throw new Error(await resp.text());

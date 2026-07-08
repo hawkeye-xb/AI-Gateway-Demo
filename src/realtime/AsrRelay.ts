@@ -1,9 +1,10 @@
 import { CreditLedgerStub } from '../infra/ledger/CreditLedgerStub';
-import { D1PriceBook } from '../infra/pricebook/D1PriceBook';
-import { DurationBasedRatePlan } from '../infra/rateplan/TokenBasedRatePlan';
+import { ConfigPriceBook } from '../infra/pricebook/ConfigPriceBook';
+import { RatePlan, rawCostUsd } from '../infra/rateplan/TokenBasedRatePlan';
 import { D1AuditSink } from '../infra/audit/D1AuditSink';
+import { CONFIG } from '../config';
 import type { CreditLedger } from '../infra/ledger/DurableObjectLedger';
-import type { PriceBookEntry } from '../domain/IRatePlan';
+import type { ModelPrice } from '../domain/IRatePlan';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Realtime ASR relay: browser mic ⇄ our Worker ⇄ DashScope Paraformer WebSocket.
@@ -48,15 +49,16 @@ const BYTES_PER_SECOND = SAMPLE_RATE * BYTES_PER_SAMPLE; // 32000
 
 // Billing knobs. HOLD_SECONDS is the pre-authorization; MAX_SECONDS is the hard
 // server-side cap so we can never deliver more audio than we reserved credits for.
-const HOLD_SECONDS = 180;
-const MAX_SECONDS = 180;
+// Both come from CONFIG (single source of truth for credit rules).
+const HOLD_SECONDS = CONFIG.asr.holdSeconds;
+const MAX_SECONDS = CONFIG.asr.maxSeconds;
 const MAX_BILLED_BYTES = MAX_SECONDS * BYTES_PER_SECOND;
+// Cap how much audio a client may buffer BEFORE the upstream task is ready, so a
+// client flooding PCM pre-'task-started' can't grow Worker memory unbounded.
+const MAX_PRESTART_BYTES = MAX_BILLED_BYTES;
 
-const DEFAULT_CREDITS_PER_SECOND = 5; // fallback if price_book row is missing
-
-function creditsForSeconds(seconds: number, entry: PriceBookEntry | null, plan: DurationBasedRatePlan): number {
-  if (!entry) return Math.max(1, Math.ceil(seconds * DEFAULT_CREDITS_PER_SECOND));
-  return plan.toCredit({ kind: 'audio_seconds', amount: seconds }, entry);
+function creditsForSeconds(seconds: number, price: ModelPrice, plan: RatePlan): number {
+  return plan.toCredit({ kind: 'audio_seconds', amount: seconds }, price);
 }
 
 /**
@@ -87,12 +89,17 @@ export function handleAsrStream(request: Request, env: RelayEnv, userId: string)
 
 async function runSession(server: WebSocket, env: RelayEnv, userId: string): Promise<void> {
   const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, userId);
-  const priceBook = new D1PriceBook(env.DB);
-  const ratePlan = new DurationBasedRatePlan();
+  const priceBook = new ConfigPriceBook();
+  const ratePlan = new RatePlan();
   const audit = new D1AuditSink(env.DB);
 
-  const entry = await priceBook.getEntry(PROVIDER, MODEL, 'asr', Date.now());
-  const holdCredits = creditsForSeconds(HOLD_SECONDS, entry, ratePlan);
+  const price = await priceBook.getEntry(PROVIDER, MODEL, 'asr', Date.now());
+  if (!price) {
+    server.send(JSON.stringify({ type: 'error', message: `no price configured for ${PROVIDER}/${MODEL}/asr` }));
+    server.close(1011, 'no price');
+    return;
+  }
+  const holdCredits = creditsForSeconds(HOLD_SECONDS, price, ratePlan);
   const requestId = crypto.randomUUID();
   const taskId = crypto.randomUUID();
 
@@ -113,6 +120,7 @@ async function runSession(server: WebSocket, env: RelayEnv, userId: string): Pro
   let settled = false;
   let billedBytes = 0;
   const preStartBuffer: ArrayBuffer[] = [];
+  let preStartBytes = 0;
 
   // ── Open the upstream DashScope socket ────────────────────────────────────
   let upstream: WebSocket;
@@ -131,8 +139,8 @@ async function runSession(server: WebSocket, env: RelayEnv, userId: string): Pro
     if (settled) return;
     settled = true;
     const seconds = usedSeconds();
-    const credits = reserved ? creditsForSeconds(seconds, entry, ratePlan) : 0;
-    const realCostUsd = entry ? seconds * entry.rawCostPerUnit : 0;
+    const credits = reserved ? creditsForSeconds(seconds, price, ratePlan) : 0;
+    const realCostUsd = rawCostUsd({ kind: 'audio_seconds', amount: seconds }, price);
     try {
       if (reserved) {
         // settle deducts the real amount and frees the whole hold (releases the rest).
@@ -195,7 +203,7 @@ async function runSession(server: WebSocket, env: RelayEnv, userId: string): Pro
     safeSend(server, {
       type: 'meter',
       usedSeconds: Math.round(usedSeconds() * 100) / 100,
-      usedCredits: creditsForSeconds(usedSeconds(), entry, ratePlan),
+      usedCredits: creditsForSeconds(usedSeconds(), price, ratePlan),
       heldCredits: holdCredits,
     });
   };
@@ -252,7 +260,13 @@ async function runSession(server: WebSocket, env: RelayEnv, userId: string): Pro
     }
     // Binary = raw PCM16 audio.
     const buf = data as ArrayBuffer;
-    if (!started) { preStartBuffer.push(buf); return; }
+    if (!started) {
+      // Buffer until the upstream task is ready, but cap total buffered bytes so a
+      // client flooding audio pre-'task-started' can't grow memory without bound.
+      preStartBytes += buf.byteLength;
+      if (preStartBytes <= MAX_PRESTART_BYTES) preStartBuffer.push(buf);
+      return;
+    }
     forwardAudio(buf);
   });
 
