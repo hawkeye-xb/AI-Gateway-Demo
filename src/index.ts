@@ -234,25 +234,28 @@ export default {
 
         const payload = JSON.parse(rawBody);
         const eventType = payload.eventType as string;
-        const accountId = payload.object?.metadata?.accountId as string;
         const externalEventId = payload.id as string;
-
-        if (!accountId) return Response.json({ ok: true });
-
-        // Dedup
+        const obj = payload.object || {};
+        // Creem nests the original checkout metadata differently per event type,
+        // so check the common spots — this lets refund/dispute events resolve the
+        // same accountId + credits we stored at checkout.
+        const meta = obj.metadata || obj.checkout?.metadata || obj.order?.metadata || {};
+        const accountId = meta.accountId as string;
         const audit = new D1AuditSink(env.DB);
-        const claimed = await audit.claimEvent(externalEventId, 'creem');
-        if (!claimed) return Response.json({ ok: true, deduped: true });
 
-        // Top up
-        if (eventType === 'checkout.completed') {
-          const credits = parseInt(payload.object?.metadata?.credits || '1000000') || 1000000;
+        // Effects are idempotent at the ledger layer (DO topUp/deduct dedup keys)
+        // and the topups UNIQUE constraint, so run them FIRST and mark the event
+        // processed LAST. The previous order (claim-then-act) had a money bug: if
+        // claimEvent succeeded but topUp then failed, Creem's retry hit the claim
+        // and was dropped as `deduped` — the purchase silently lost, no credits, no
+        // alert. Now a mid-way failure leaves the event unclaimed, so the retry
+        // re-runs the idempotent effect instead of vanishing.
+        if (accountId && eventType === 'checkout.completed') {
+          const credits = parseInt(meta.credits || '1000000') || 1000000;
           const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, accountId);
           await ledger.topUp(accountId, credits, 'creem-' + externalEventId);
-          // Record the top-up so "how much did I top up" is queryable from D1
-          // (previously only the event id was stored, with no amount).
-          const order = (payload.object?.order || {}) as { amount?: number; amount_paid?: number; currency?: string };
-          const amountCents = order.amount ?? order.amount_paid ?? payload.object?.amount;
+          const order = (obj.order || {}) as { amount?: number; amount_paid?: number; currency?: string };
+          const amountCents = order.amount ?? order.amount_paid ?? obj.amount;
           await audit.recordTopUp({
             accountId,
             externalEventId,
@@ -262,8 +265,30 @@ export default {
             currency: order.currency ?? null,
             timestamp: Date.now(),
           });
+        } else if (accountId && (eventType === 'refund.created' || eventType === 'dispute.created')) {
+          // Reverse the credits granted by the original purchase. Idempotent +
+          // clamped at 0 in the DO (the user may already have spent some).
+          // NOTE: verify the metadata path above against a live refund event for
+          // your Creem account; production should reconcile against the order.
+          const credits = parseInt(meta.credits || '0') || 0;
+          if (credits > 0) {
+            const ledger = new CreditLedgerStub(env.CREDIT_LEDGER, accountId);
+            await ledger.deduct(accountId, credits, 'creem-refund-' + externalEventId);
+            await audit.recordTopUp({
+              accountId,
+              externalEventId,
+              source: 'creem-refund',
+              credits: -credits,
+              amountUsd: null,
+              currency: null,
+              timestamp: Date.now(),
+            });
+          }
         }
 
+        // Mark processed AFTER the effect — bookkeeping, not a gate that can
+        // strand a failed-then-retried event.
+        await audit.claimEvent(externalEventId, 'creem');
         return Response.json({ ok: true });
       } catch (e) {
         return Response.json({ error: (e as Error).message }, { status: 500 });

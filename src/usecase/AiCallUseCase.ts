@@ -72,11 +72,15 @@ export class AiCallUseCase {
       return transport.respond({ raw: resp.raw, cost });
     } catch (e) {
       if (e instanceof PartialFailureError) {
-        // Bill the partial usage at the real rate (not a flat 1/unit) so a
-        // truncated call still charges accurately.
+        // Bill the partial usage at the real rate. Same posture as the main path:
+        // a missing price is a config error, so release the hold rather than
+        // silently settling 0 (the error still propagates via the re-throw below).
         const price = await this.priceBook.getEntry(req.providerKey, req.model, req.modality, Date.now());
-        const cost = price ? this.ratePlan.toCredit(e.partialUsage, price) : 0;
-        await this.ledger.settle(reservationId, cost);
+        if (price) {
+          await this.ledger.settle(reservationId, this.ratePlan.toCredit(e.partialUsage, price));
+        } else {
+          await this.ledger.release(reservationId);
+        }
       } else if (e instanceof Error && 'releaseReservation' in e) {
         const pe = e as unknown as ProviderCallError;
         if (pe.releaseReservation) await this.ledger.release(reservationId);
@@ -110,8 +114,16 @@ export class AiCallUseCase {
         return toCredits(estSeconds * (price?.rates.audioSecond ?? 0));
       }
       case 'vision': {
-        // Image-token count is unknown pre-call; reserve a generous flat buffer.
-        return 5000;
+        // Image token count is unknown pre-call, so hold a nominal budget derived
+        // from CONFIG rates (a price/markup change scales the hold too — no bare
+        // constant that drifts from the price book). Nominal token counts are just
+        // an estimation heuristic; settle() trues up to the metered cost.
+        const NOMINAL_VISION_INPUT_TOKENS = 1500;
+        const NOMINAL_VISION_OUTPUT_TOKENS = 512;
+        return toCredits(
+          NOMINAL_VISION_INPUT_TOKENS * (price?.rates.inputToken ?? 0) +
+          NOMINAL_VISION_OUTPUT_TOKENS * (price?.rates.outputToken ?? 0),
+        );
       }
       case 'llm':
       default: {

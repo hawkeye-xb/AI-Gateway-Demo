@@ -65,9 +65,9 @@ provider → meter usage → settle → audit**.
   **pre-authorized on connect** and **settled by actual streamed duration on stop**.
 - **Per-user rate limiting & abuse control** — enforced at the ledger chokepoint (see
   [below](#rate-limiting--abuse-control)).
-- **Transparent pricing** — a D1 `price_book` stores each provider's raw cost; the gateway
-  applies a markup (100× in this demo, to make credit movement visible) and converts to
-  integer credits.
+- **Transparent pricing** — per-model raw costs + markup live in `src/config.ts` (one
+  file); the gateway bills input/output at their own rates (100× markup in this demo, to
+  make credit movement visible) and converts to integer credits.
 - **Payments** via [Creem](https://creem.io): checkout + signature-verified webhook that
   tops up the ledger idempotently.
 - **Usage audit** — every spend and top-up is recorded in D1 and shown in the UI.
@@ -131,8 +131,9 @@ level — no domain logic changes:
    (currently `*`).
 4. **Cloudflare WAF** — add a global rate rule (per-user limits don't stop multi-account
    farming; see below).
-5. **Handle refunds** — the webhook only processes `checkout.completed` today; add a
-   `refund`/`chargeback` branch before taking real money.
+5. **Verify refunds** — the webhook handles `refund.created` / `dispute.created` (deducts
+   credits, idempotent, clamped at 0). Confirm the metadata path against a live refund
+   event for your Creem account before taking real money.
 
 ---
 

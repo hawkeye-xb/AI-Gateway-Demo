@@ -338,10 +338,13 @@ async function gwRefreshLog() {
       tb.innerHTML = '<tr><td colspan="5" style="color:var(--subtle)">No usage yet</td></tr>';
     } else {
       tb.innerHTML = d.rows.map(function(r) {
-        var isTop = r.kind === 'topup';
+        var creds = Number(r.credits);
+        var neg = creds < 0;                       // refund/chargeback: topup row w/ negative credits
+        var isTop = r.kind === 'topup' && !neg;
         var sign = isTop ? '+' : '-';
         var col = isTop ? '#3fb950' : '#f0883e';
-        return '<tr><td>'+new Date(r.timestamp).toLocaleString()+'</td><td>'+r.modality+'</td><td>'+r.model+'</td><td>'+r.usage_amount+' '+r.usage_kind+'</td><td class="num" style="color:'+col+'">'+sign+r.credits+'</td></tr>';
+        var amt = Math.abs(creds);
+        return '<tr><td>'+new Date(r.timestamp).toLocaleString()+'</td><td>'+r.modality+'</td><td>'+r.model+'</td><td>'+Math.abs(Number(r.usage_amount))+' '+r.usage_kind+'</td><td class="num" style="color:'+col+'">'+sign+amt+'</td></tr>';
       }).join('');
     }
   } catch(_e) {}

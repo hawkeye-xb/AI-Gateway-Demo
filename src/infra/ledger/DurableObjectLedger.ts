@@ -119,6 +119,9 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
         case 'topUp':
           await this.topUp(args[0] as string, args[1] as number, args[2] as string);
           break;
+        case 'deduct':
+          await this.deduct(args[0] as string, args[1] as number, args[2] as string);
+          break;
         default:
           return new Response(JSON.stringify({ error: `unknown method: ${method}` }), { status: 400 });
       }
@@ -205,6 +208,19 @@ export class CreditLedger extends DurableObject implements ICreditLedger {
     // absurd balance. Idempotency-safe: we always mark the event processed, so
     // Creem never retries a clamped top-up into a loop.
     this.balance = Math.min(this.balance + amount, CreditLedger.MAX_BALANCE_CREDITS);
+    await this.ctx.storage.put(dedupKey, true);
+    await this.persistBalance();
+  }
+
+  // Reverse a top-up (refund / chargeback). Mirror of topUp: idempotent via a
+  // persisted 'deduct:' key so a webhook retry can't double-deduct, and clamped
+  // at 0 because the user may already have spent some of the refunded credits —
+  // a refund must never drive the balance negative.
+  async deduct(_accountId: string, amount: number, idempotencyKey: string): Promise<void> {
+    await this.ensureLoaded();
+    const dedupKey = 'deduct:' + idempotencyKey;
+    if (await this.ctx.storage.get(dedupKey)) return;
+    this.balance = Math.max(0, this.balance - amount);
     await this.ctx.storage.put(dedupKey, true);
     await this.persistBalance();
   }

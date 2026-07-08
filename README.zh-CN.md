@@ -55,8 +55,8 @@
   服务商，再把字幕实时流回来。credits 在**连接时预扣**、**停止时按实际流过的音频秒数
   结算**。
 - **每用户限流与防刷**——挂在账本收口处（见[下文](#限流与防刷)）。
-- **透明定价**——D1 的 `price_book` 存每个服务商的原始成本；网关加价（本 demo 用 100×，
-  让 credit 变化肉眼可见）后换算成整数 credits。
+- **透明定价**——每个 model 的原始成本 + 加价都在 `src/config.ts` 一个文件里；网关按 input/
+  output 各自单价计费（本 demo 用 100× 加价，让 credit 变化肉眼可见）后换算成整数 credits。
 - **支付**走 [Creem](https://creem.io)：checkout + 验签的 webhook，幂等地给账本充值。
 - **用量审计**——每一笔消费和充值都记进 D1，并显示在界面上。
 - **社交 + 邮箱登录**——Supabase 邮箱/密码，以及 Google OAuth。
@@ -114,8 +114,8 @@
 2. **密钥** —— 真实 provider key + 正式（非 test）Creem key，走 `wrangler secret`。
 3. **`wrangler.toml [vars]`** —— 你的 Supabase 项目 + Creem product id；收紧 CORS（现在是 `*`）。
 4. **Cloudflare WAF** —— 加全局限流规则（每用户限流挡不住多账号农场，见下文）。
-5. **处理退款** —— webhook 目前只处理 `checkout.completed`；收真钱前加一个
-   `refund`/`chargeback` 分支。
+5. **验证退款** —— webhook 已处理 `refund.created` / `dispute.created`（扣回 credits，
+   幂等，clamp 到 0）。收真钱前用你 Creem 账号的真实退款事件确认 metadata 路径。
 
 ---
 

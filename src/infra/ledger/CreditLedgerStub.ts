@@ -53,4 +53,7 @@ export class CreditLedgerStub {
   async topUp(accountId: string, amount: number, idempotencyKey: string): Promise<void> {
     await this.call('topUp', accountId, amount, idempotencyKey);
   }
+  async deduct(accountId: string, amount: number, idempotencyKey: string): Promise<void> {
+    await this.call('deduct', accountId, amount, idempotencyKey);
+  }
 }

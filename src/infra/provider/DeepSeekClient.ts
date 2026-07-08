@@ -2,7 +2,6 @@ import type {
   IAiProviderClient,
   ProviderRequest,
   ProviderResponse,
-  ProviderStreamChunk,
 } from '../../domain/IAiProviderClient';
 import {
   ClientInputError,
@@ -65,70 +64,9 @@ export class DeepSeekClient implements IAiProviderClient {
     return { raw: data, usage };
   }
 
-  async invokeStream(req: ProviderRequest): Promise<ReadableStream<ProviderStreamChunk>> {
-    const body = { ...(req.input as Record<string, unknown>), stream: true };
-    const resp = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => 'unknown');
-      if (resp.status >= 500) throw new ProviderUnavailableError(`DeepSeek SSE error ${resp.status}: ${errText}`);
-      throw new ClientInputError(`DeepSeek SSE error ${resp.status}: ${errText}`);
-    }
-
-    if (!resp.body) throw new ProviderUnavailableError('DeepSeek: no response body');
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let totalTokens = 0;
-
-    return new ReadableStream<ProviderStreamChunk>({
-      async pull(controller) {
-        try {
-          const { done, value } = await reader.read();
-          if (done) {
-            controller.enqueue({
-              raw: null,
-              isFinal: true,
-              usage: { kind: 'tokens', amount: totalTokens },
-            });
-            controller.close();
-            return;
-          }
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6).trim();
-            if (data === '[DONE]') {
-              controller.enqueue({
-                raw: null,
-                isFinal: true,
-                usage: { kind: 'tokens', amount: totalTokens },
-              });
-              controller.close();
-              return;
-            }
-            try {
-              const parsed = JSON.parse(data);
-              const choice = parsed.choices?.[0];
-              if (choice?.delta?.content) totalTokens++;
-              controller.enqueue({ raw: parsed, isFinal: false });
-            } catch { /* skip malformed SSE */ }
-          }
-        } catch (e) {
-          controller.error(e);
-        }
-      },
-    });
-  }
+  // NOTE: streaming LLM was intentionally removed. The previous invokeStream had
+  // no caller (dead code) AND its usage lacked the input/output token split, so it
+  // would have billed a stream at the input rate — the exact approximation the
+  // synchronous path was fixed to avoid. If you wire streaming, populate
+  // RawUsage.inputTokens/outputTokens from the final chunk before billing.
 }

@@ -4,4 +4,5 @@ export interface ICreditLedger {
   release(reservationId: string): Promise<void>;
   getBalance(accountId: string): Promise<number>;
   topUp(accountId: string, amount: number, idempotencyKey: string): Promise<void>;
+  deduct(accountId: string, amount: number, idempotencyKey: string): Promise<void>;
 }
