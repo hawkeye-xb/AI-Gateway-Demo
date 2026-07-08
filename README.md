@@ -78,17 +78,61 @@ provider → meter usage → settle → audit**.
 ## Credits & billing model
 
 - **1 credit = $0.0001 USD**, so **1,000,000 credits = $1**. Credits are stored as integers.
-- Charged price = `raw_provider_cost × markup_multiplier`, converted to credits and rounded
-  up. This demo uses a **100× markup** purely so balance changes are easy to see; change
-  `markup_multiplier` in the `price_book` for realistic pricing.
+- Charged price = `raw_provider_cost × markup`, converted to credits and rounded up. This
+  demo uses a **100× markup** purely so balance changes are easy to see; set your real
+  margin in `src/config.ts`.
+- **Input and output are billed at their own rates** (not summed and charged at the input
+  rate). deepseek output ≈ 4× input, so an output-heavy call costs proportionally more.
 - Formula (see `src/infra/rateplan/TokenBasedRatePlan.ts`):
 
   ```
-  credits = ceil( usage × raw_cost_per_unit × markup / 0.0001 )
+  credits = ceil( (inputTokens × inputRate + outputTokens × outputRate) × markup / 0.0001 )
   ```
 
 Everything metered is authoritative at **settle** time; the pre-call **reserve** is only an
 affordability gate (an upper-ish estimate), never the final charge.
+
+---
+
+## Configuration — one file (`src/config.ts`)
+
+Every **credit rule** lives in one typed file, `src/config.ts` — the only file you edit to
+customize billing. Infrastructure identity (CF account, D1 id, Supabase, API keys) stays in
+`wrangler.toml` + `wrangler secret`, not here.
+
+| Setting | Field | What it controls |
+|---------|-------|------------------|
+| Signup grant | `ledger.initialCredits` | Free credits on first use (`0` to disable) |
+| Balance cap | `ledger.maxBalanceCredits` | Max balance per user (anti-farming) |
+| Rate limits | `ledger.rateLimit.{perMinute,perDay}` | Per-user request throttle |
+| Exchange rate | `creditExchangeRateUsd` | USD per credit |
+| Pricing | `pricing.models[]` | Per-model `rates` (input/output/audio) + optional per-model `markup` |
+| Default markup | `pricing.defaultMarkup` | Applied when a model has no `markup` |
+| ASR bounds | `asr.{holdSeconds,maxSeconds}` | Realtime session pre-auth hold + hard cap |
+| Purchase packages | `packages` | Server-side price↔credits table (client sends only a package id) |
+
+**Price source (important for forkers):** by default the price book reads from `config.ts`
+(`ConfigPriceBook`). The D1 `price_book` table still exists (migrations create it) but is
+**not used** by default — editing that SQL will have **no effect** unless you switch the
+price source. To make prices runtime-editable (SQL `UPDATE`, no redeploy) instead of a code
+constant, swap one line in `buildUseCase()` (`index.ts`): `new ConfigPriceBook()` →
+`new D1PriceBook(env.DB)` (and the same in `AsrRelay.ts`). This one-line swap is the
+hexagonal architecture paying off — pricing is an injected `IPriceBook` adapter.
+
+### Productionization checklist (fork → live)
+
+Because the rules are consolidated, forking to a production deployment is config/constant
+level — no domain logic changes:
+
+1. **`config.ts`** — set `initialCredits` (often `0`), real `pricing.models` rates +
+   `defaultMarkup` (drop the demo 100×), `packages`, and `rateLimit` for your capacity.
+2. **Secrets** — real provider keys + a live (non-test) Creem key via `wrangler secret`.
+3. **`wrangler.toml [vars]`** — your Supabase project + Creem product id; restrict CORS
+   (currently `*`).
+4. **Cloudflare WAF** — add a global rate rule (per-user limits don't stop multi-account
+   farming; see below).
+5. **Handle refunds** — the webhook only processes `checkout.completed` today; add a
+   `refund`/`chargeback` branch before taking real money.
 
 ---
 
@@ -135,13 +179,14 @@ src/
     auth/         #   SupabaseJwtAuthProvider  (JWKS verification via jose)
     provider/     #   DeepSeekClient, BailianClient  (LLM / vision / ASR)
     ledger/       #   CreditLedger (Durable Object) + CreditLedgerStub  (+ rate limiting)
-    pricebook/    #   D1PriceBook
-    rateplan/     #   TokenBasedRatePlan / DurationBasedRatePlan
+    pricebook/    #   ConfigPriceBook (default, reads config.ts) + D1PriceBook (alt)
+    rateplan/     #   RatePlan (unit-aware: input/output/audio) + rawCostUsd()
     audit/        #   D1AuditSink
     usage/        #   TokenUsageExtractor / AudioDurationExtractor
     transport/    #   HttpTransportAdapter
   realtime/
     AsrRelay.ts   # WebSocket relay: browser ⇄ Worker ⇄ provider, reserve/settle
+  config.ts       # ← single source of truth for ALL credit rules (see Configuration)
   ui.ts           # served single-page dashboard (HTML/CSS/JS)
   index.ts        # Worker entry: routing, auth, payments, config injection
 migrations/       # D1 schema + seed price_book
@@ -242,7 +287,7 @@ This repo is a **learning reference**. It already does the essentials:
 Before running anything resembling production, also consider:
 
 - **Global / tenant-wide limits** — per-user limits don't stop mass multi-account farming.
-- **Markup / pricing** — the 100× markup is a demo aid; set real prices in `price_book`.
+- **Markup / pricing** — the 100× markup is a demo aid; set real rates in `src/config.ts`.
 - **CORS** is wide open (`*`) for demo convenience; restrict it.
 - **Reservation TTL/prune** logic (`CreditLedger`) — review for your workload.
 - Rotate any key that has ever been shared.
