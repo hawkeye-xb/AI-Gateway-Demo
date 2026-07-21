@@ -13,7 +13,7 @@ import type { ModelPrice } from '../domain/IRatePlan';
 // exists to demonstrate the *reserve → settle* billing lifecycle that a gateway
 // needs but that the instant LLM/vision calls never really exercise:
 //
-//   1. On connect  → RESERVE an upfront hold (预扣). Guarantees the user can pay
+//   1. On connect  → RESERVE an upfront hold. Guarantees the user can pay
 //                     for at least MAX_SECONDS of audio before a single byte flows.
 //   2. While live  → forward PCM frames up, forward transcripts down, and meter
 //                     used-seconds/used-credits back to the client in real time.
@@ -103,7 +103,7 @@ async function runSession(server: WebSocket, env: RelayEnv, userId: string): Pro
   const requestId = crypto.randomUUID();
   const taskId = crypto.randomUUID();
 
-  // ── 1. Pre-authorization hold (预扣) ──────────────────────────────────────
+  // ── 1. Pre-authorization hold ──────────────────────────────────────
   let reserved = false;
   try {
     await ledger.reserve(userId, holdCredits, requestId);
