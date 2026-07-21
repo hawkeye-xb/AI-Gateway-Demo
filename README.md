@@ -1,7 +1,5 @@
 # ⚡ AI Gateway Demo
 
-**English** · [简体中文](./README.zh-CN.md)
-
 A credit-metered, multi-modal **AI gateway** running entirely on Cloudflare Workers.
 It sits in front of several AI providers, meters usage, applies a markup, enforces
 per-user rate limits, and bills a prepaid **credit** balance per user — the core of what
